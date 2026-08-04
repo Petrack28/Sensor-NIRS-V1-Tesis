@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>NIRS 2.0 — Control</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.3.4/mqtt.min.js"></script>
+<style>
+  :root{
+    --bg:#12151a; --panel:#1b1f27; --panel2:#232833; --border:#323846;
+    --text:#e8eaef; --muted:#8a91a3; --accent:#4da3ff; --accent2:#ff6b6b;
+    --green:#3ddc84; --orange:#ffb648; --red:#ff5c5c;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;font-size:15px;}
+  header{position:sticky;top:0;z-index:10;background:var(--panel);
+         border-bottom:1px solid var(--border);padding:10px 14px;
+         display:flex;align-items:center;justify-content:space-between;}
+  header h1{font-size:16px;margin:0;font-weight:600;}
+  .dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:6px;background:var(--red);}
+  .dot.on{background:var(--green);}
+  #connLabel{font-size:12px;color:var(--muted);display:flex;align-items:center;}
+  nav{display:flex;background:var(--panel);border-bottom:1px solid var(--border);
+      position:sticky;top:41px;z-index:9;overflow-x:auto;}
+  nav button{flex:1;min-width:80px;background:none;border:none;color:var(--muted);
+             padding:11px 6px;font-size:13px;font-weight:600;border-bottom:2px solid transparent;}
+  nav button.active{color:var(--accent);border-bottom-color:var(--accent);}
+  main{padding:12px;max-width:640px;margin:0 auto;}
+  .tab{display:none;} .tab.active{display:block;}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;
+        padding:12px;margin-bottom:12px;}
+  .card h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);
+           margin:0 0 10px;}
+  .row{display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap;}
+  .row label{flex:0 0 96px;color:var(--muted);font-size:13px;}
+  input,select{background:var(--panel2);border:1px solid var(--border);color:var(--text);
+        border-radius:8px;padding:8px 10px;font-size:14px;flex:1;min-width:0;}
+  input[type=number]{width:90px;flex:0 0 90px;}
+  button.btn{background:var(--accent);color:#08131f;border:none;border-radius:8px;
+        padding:9px 14px;font-size:13px;font-weight:700;cursor:pointer;}
+  button.btn.secondary{background:var(--panel2);color:var(--text);border:1px solid var(--border);}
+  button.btn.danger{background:var(--red);color:#2a0000;}
+  button.btn.wide{width:100%;padding:12px;font-size:15px;}
+  button.btn:active{opacity:.8;}
+  .btnrow{display:flex;gap:8px;flex-wrap:wrap;}
+  canvas{width:100%;height:150px;background:#0c0e12;border-radius:8px;display:block;
+         border:1px solid var(--border);}
+  .legend{display:flex;gap:14px;font-size:12px;color:var(--muted);margin:6px 0 2px;}
+  .legend span{display:inline-flex;align-items:center;gap:5px;}
+  .sw{width:10px;height:10px;border-radius:2px;display:inline-block;}
+  .muted{color:var(--muted);font-size:12px;}
+  .statusline{font-size:13px;margin-top:6px;}
+  .statusline.ok{color:var(--green);} .statusline.warn{color:var(--orange);} .statusline.err{color:var(--red);}
+  #log{background:#0c0e12;border:1px solid var(--border);border-radius:8px;padding:8px;
+       height:110px;overflow-y:auto;font-family:ui-monospace,Consolas,monospace;font-size:11px;
+       color:var(--muted);white-space:pre-wrap;}
+  .filelist{list-style:none;margin:0;padding:0;}
+  .filelist li{display:flex;align-items:center;justify-content:space-between;gap:8px;
+        padding:8px 0;border-bottom:1px solid var(--border);}
+  .filelist li:last-child{border-bottom:none;}
+  .fname{font-size:13px;word-break:break-all;}
+  .fsize{font-size:11px;color:var(--muted);}
+  .flinks a, .flinks button{font-size:12px;padding:6px 9px;}
+  a.dl{background:var(--green);color:#062814;border-radius:6px;padding:6px 9px;
+       text-decoration:none;font-weight:700;font-size:12px;}
+  .bar{height:6px;border-radius:3px;background:var(--panel2);overflow:hidden;margin-top:6px;}
+  .bar>div{height:100%;background:var(--accent);}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+  .pill{display:inline-block;background:var(--panel2);border:1px solid var(--border);
+        border-radius:999px;padding:2px 9px;font-size:11px;color:var(--muted);}
+  fieldset{border:1px solid var(--border);border-radius:10px;margin:0 0 10px;padding:8px 10px;}
+  legend{font-size:12px;color:var(--muted);padding:0 4px;}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>NIRS 2.0</h1>
+  <div id="connLabel"><span class="dot" id="connDot"></span><span id="connText">Conectando…</span></div>
+</header>
+
+<nav>
+  <button class="active" data-tab="principal">Principal</button>
+  <button data-tab="s1">Sensor 1</button>
+  <button data-tab="s2">Sensor 2</button>
+  <button data-tab="archivos">Archivos</button>
+</nav>
+
+<main>
+
+  <!-- ======================= TAB PRINCIPAL ======================= -->
+  <section class="tab active" id="tab-principal">
+
+    <div class="card">
+      <h2>Sensor 1 — IR / Rojo</h2>
+      <canvas id="chart1" width="600" height="150"></canvas>
+      <div class="legend">
+        <span><i class="sw" style="background:#4da3ff"></i>IR</span>
+        <span><i class="sw" style="background:#ff5c5c"></i>Rojo</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Sensor 2 — IR / Rojo</h2>
+      <canvas id="chart2" width="600" height="150"></canvas>
+      <div class="legend">
+        <span><i class="sw" style="background:#4da3ff"></i>IR</span>
+        <span><i class="sw" style="background:#ff5c5c"></i>Rojo</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Adquisición</h2>
+      <div class="row">
+        <label>Modo</label>
+        <select id="acqMode">
+          <option value="realtime">Tiempo real (sin guardar)</option>
+          <option value="timed">Temporizado (guarda CSV)</option>
+        </select>
+      </div>
+      <div id="timedFields">
+        <div class="row"><label>Nombre</label><input id="acqName" type="text" placeholder="experimento1"></div>
+        <div class="row"><label>Duración (s)</label><input id="acqDuration" type="number" value="600" min="1"></div>
+      </div>
+      <div class="btnrow">
+        <button class="btn" id="btnPlay">▶ Iniciar</button>
+        <button class="btn secondary" id="btnStop" disabled>■ Detener</button>
+      </div>
+      <div class="statusline" id="acqStatus">Listo.</div>
+    </div>
+
+    <div class="card">
+      <h2>Consola</h2>
+      <div id="log"></div>
+    </div>
+
+  </section>
+
+  <!-- ======================= TAB SENSOR (plantilla) ======================= -->
+  <section class="tab" id="tab-s1"></section>
+  <section class="tab" id="tab-s2"></section>
+
+  <!-- ======================= TAB ARCHIVOS ======================= -->
+  <section class="tab" id="tab-archivos">
+    <div class="card" id="localAddrCard" style="display:none;">
+      <h2>Conexión local (para descargar)</h2>
+      <div class="muted" style="margin-bottom:8px;">
+        Esta página se cargó desde internet, así que para listar/descargar
+        archivos necesito la dirección local del ESP32 — solo funciona si
+        tu teléfono está en la MISMA red WiFi que él.
+      </div>
+      <div class="row">
+        <label>IP o nirs32.local</label>
+        <input type="text" id="localAddr" placeholder="192.168.1.45 o nirs32.local">
+      </div>
+      <button class="btn wide" id="btnSetLocalAddr">Conectar localmente</button>
+    </div>
+    <div class="card">
+      <h2>Espacio en el ESP32</h2>
+      <div class="muted" id="spaceLabel">-- / -- KB</div>
+      <div class="bar"><div id="spaceBar" style="width:0%"></div></div>
+    </div>
+    <div class="card">
+      <h2>Archivos CSV / config</h2>
+      <div class="btnrow" style="margin-bottom:10px;">
+        <button class="btn secondary" id="btnRefreshFiles">↻ Actualizar lista</button>
+      </div>
+      <ul class="filelist" id="fileList"><li class="muted">Sin archivos aún.</li></ul>
+    </div>
+  </section>
+
+</main>
+
+<script>
+// ============================================================
+// CONFIGURACIÓN / CONSTANTES (mismos mapeos que la GUI de Python)
+// ============================================================
+const FSAMPLE_PRESETS = {
+  "1000 Hz":0x0008, "500 Hz":0x0010, "400 Hz":0x0014, "200 Hz":0x0028,
+  "100 Hz":0x0050, "50 Hz":0x00A0, "25 Hz":0x0140, "10 Hz":0x0320
+};
+const AVG_PRESETS = {
+  "Sin promediado (1x)":0x0000, "2x":0x0110, "4x":0x0220,
+  "8x":0x0330, "16x":0x0440, "32x":0x0550
+};
+const TIA_RF_MAP   = {"200 kΩ":0x0, "100 kΩ":0x1, "50 kΩ":0x2, "25 kΩ":0x3};
+const RINT_MAP     = {"400 kΩ (max SNR)":0x000, "200 kΩ":0x100, "100 kΩ":0x200};
+const AFE_BASE_CONFIG = 0x1C38;
+
+const ILED_FINE_DEFAULT = 0xC;
+const FINE_FACTOR = 0.74 + 0.022*ILED_FINE_DEFAULT;
+function getCoarseForCurrent(targetMa, scale){
+  const sf = 0.1 + 0.9*scale;
+  let bestC=0, bestE=Infinity;
+  for(let c=0;c<16;c++){
+    const e = Math.abs((50.3+19.8*c)*FINE_FACTOR*sf - targetMa);
+    if(e<bestE){bestE=e; bestC=c;}
+  }
+  return bestC;
+}
+function convertMaToReg(ma){
+  if(ma<=0) return 0;
+  const MAX_SCALE0 = (50.3+19.8*15)*FINE_FACTOR*0.1;
+  const scale = ma<=MAX_SCALE0 ? 0 : 1;
+  return 0x1000 | (scale<<13) | getCoarseForCurrent(ma, scale);
+}
+function getActualCurrentMa(reg){
+  const scale=(reg>>13)&0x1, coarse=reg&0xF;
+  return Math.round((50.3+19.8*coarse)*FINE_FACTOR*(0.1+0.9*scale)*10)/10;
+}
+function buildTiaReg(rfKey, rintKey){
+  return AFE_BASE_CONFIG | (RINT_MAP[rintKey]||0) | (TIA_RF_MAP[rfKey]||0);
+}
+
+// ============================================================
+// MQTT (HiveMQ Cloud, vía WebSocket seguro — control y datos en vivo
+// desde cualquier lugar con internet, sin importar la red del ESP32)
+// ============================================================
+// ⚠️ Deben coincidir EXACTAMENTE con los valores del firmware (.ino)
+const MQTT_HOST     = "981aa97ca1ed427699decebef462d689.s1.eu.hivemq.cloud";
+const MQTT_WSS_PORT = 8884;
+const MQTT_USER     = "sensornirs";
+const MQTT_PASS     = "sensornirs123";
+const TOPIC_CMD    = "nirs/cmd";
+const TOPIC_DATA   = "nirs/data";
+const TOPIC_STATUS = "nirs/status";
+
+let mqttClientJS = null, mqttConnected = false;
+function mqttConnectJS(){
+  const url = `wss://${MQTT_HOST}:${MQTT_WSS_PORT}/mqtt`;
+  mqttClientJS = mqtt.connect(url, {
+    username: MQTT_USER, password: MQTT_PASS,
+    clientId: "nirs_web_" + Math.random().toString(16).slice(2),
+    reconnectPeriod: 2000,
+  });
+  mqttClientJS.on('connect', () => {
+    mqttConnected = true; setConn(true);
+    mqttClientJS.subscribe(TOPIC_DATA);
+    mqttClientJS.subscribe(TOPIC_STATUS);
+    send('STATUS');
+  });
+  mqttClientJS.on('close',  () => { mqttConnected = false; setConn(false); });
+  mqttClientJS.on('error',  (e) => { console.error('MQTT error:', e); });
+  mqttClientJS.on('message', (topic, payload) => {
+    const msg = payload.toString();
+    if(topic === TOPIC_DATA)   onDataMessage(msg);
+    else                       onStatusMessage(msg);
+  });
+}
+function setConn(ok){
+  document.getElementById('connDot').classList.toggle('on', ok);
+  document.getElementById('connText').textContent = ok ? "Conectado (MQTT)" : "Desconectado — reintentando…";
+}
+function send(cmd){
+  if(mqttClientJS && mqttConnected) mqttClientJS.publish(TOPIC_CMD, cmd);
+  logLine("> " + cmd);
+}
+const dataLineRe = /^\d+,\d+,\d+,\d+$/;
+function onDataMessage(msg){
+  if(dataLineRe.test(msg)){
+    const [ir1,red1,ir2,red2] = msg.split(',').map(Number);
+    pushSample(1, ir1, red1);
+    pushSample(2, ir2, red2);
+  }
+}
+function onStatusMessage(msg){
+  if(msg === "ONLINE" || msg === "OFFLINE"){ logLine("ESP32: " + msg); return; }
+  if(msg.startsWith("FILES:")) { renderFiles(msg.substring(6)); return; }
+  if(msg.startsWith("ACK: RECORD_START:")) { onRecordStarted(msg.substring(19)); }
+  if(msg.startsWith("ACK: RECORD_STOP:"))  { onRecordStopped(); }
+  logLine(msg);
+}
+function logLine(s){
+  const el = document.getElementById('log');
+  el.textContent += s + "\n";
+  if(el.textContent.length > 12000) el.textContent = el.textContent.slice(-8000);
+  el.scrollTop = el.scrollHeight;
+}
+
+// ============================================================
+// GRÁFICAS (canvas nativo, ventana deslizante de 10 s)
+// ============================================================
+const WINDOW_S = 10.0;
+const charts = {
+  1: {canvas:null, ctx:null, t:[], ir:[], red:[], t0:performance.now()},
+  2: {canvas:null, ctx:null, t:[], ir:[], red:[], t0:performance.now()},
+};
+function initCharts(){
+  for(const id of [1,2]){
+    const c = document.getElementById('chart'+id);
+    const ctx = c.getContext('2d');
+    const ratio = window.devicePixelRatio || 1;
+    c.width = c.clientWidth*ratio; c.height = c.clientHeight*ratio;
+    ctx.scale(ratio, ratio);
+    charts[id].canvas = c; charts[id].ctx = ctx;
+  }
+}
+function pushSample(id, ir, red){
+  const ch = charts[id];
+  const t = (performance.now() - ch.t0)/1000.0;
+  ch.t.push(t); ch.ir.push(ir); ch.red.push(red);
+  const tMin = t - WINDOW_S;
+  while(ch.t.length && ch.t[0] < tMin){ ch.t.shift(); ch.ir.shift(); ch.red.shift(); }
+}
+function drawChart(id){
+  const ch = charts[id];
+  if(!ch.ctx || ch.t.length<2) return;
+  const ctx = ch.ctx;
+  const W = ch.canvas.clientWidth, H = ch.canvas.clientHeight;
+  ctx.clearRect(0,0,W,H);
+  const tMax = ch.t[ch.t.length-1], tMin = tMax - WINDOW_S;
+  let mn = Math.min(...ch.ir, ...ch.red), mx = Math.max(...ch.ir, ...ch.red);
+  if(mx-mn < 10){ mx += 10; mn -= 10; }
+  const pad = (mx-mn)*0.08; mn -= pad; mx += pad;
+  const px = t => ((t-tMin)/(tMax-tMin||1))*W;
+  const py = v => H - ((v-mn)/(mx-mn||1))*H;
+  // grid
+  ctx.strokeStyle = "#232833"; ctx.lineWidth=1;
+  for(let i=0;i<=4;i++){ const y=H*i/4; ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+  function drawLine(arr, color){
+    ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.beginPath();
+    for(let i=0;i<ch.t.length;i++){
+      const x = px(ch.t[i]), y = py(arr[i]);
+      if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    }
+    ctx.stroke();
+  }
+  drawLine(ch.ir, "#4da3ff");
+  drawLine(ch.red, "#ff5c5c");
+}
+function animate(){ drawChart(1); drawChart(2); requestAnimationFrame(animate); }
+
+// ============================================================
+// ADQUISICIÓN (tiempo real / temporizado con grabación CSV)
+// ============================================================
+let recording = false, recTimer = null, recRemaining = 0;
+document.getElementById('acqMode').addEventListener('change', (e)=>{
+  document.getElementById('timedFields').style.display = (e.target.value==='timed') ? 'block' : 'none';
+});
+document.getElementById('btnPlay').addEventListener('click', ()=>{
+  const mode = document.getElementById('acqMode').value;
+  if(mode === 'realtime'){
+    setAcqStatus('Viendo en tiempo real (sin guardar).', 'ok');
+    document.getElementById('btnPlay').disabled = true;
+    document.getElementById('btnStop').disabled = false;
+    return;
+  }
+  const name = (document.getElementById('acqName').value || 'registro').trim();
+  const dur  = parseInt(document.getElementById('acqDuration').value || '600', 10);
+  const iso  = new Date().toISOString();
+  send('RECORD_START:' + name + ':' + iso);
+  recRemaining = dur;
+  document.getElementById('btnPlay').disabled = true;
+});
+document.getElementById('btnStop').addEventListener('click', ()=>{
+  if(recording){ send('RECORD_STOP'); }
+  else {
+    document.getElementById('btnPlay').disabled = false;
+    document.getElementById('btnStop').disabled = true;
+    setAcqStatus('Listo.', '');
+  }
+});
+function onRecordStarted(name){
+  recording = true;
+  document.getElementById('btnStop').disabled = false;
+  setAcqStatus('Grabando "' + name + '"… ' + recRemaining + ' s restantes', 'warn');
+  clearInterval(recTimer);
+  recTimer = setInterval(()=>{
+    recRemaining--;
+    setAcqStatus('Grabando "' + name + '"… ' + Math.max(recRemaining,0) + ' s restantes', 'warn');
+    if(recRemaining<=0){ clearInterval(recTimer); send('RECORD_STOP'); }
+  }, 1000);
+}
+function onRecordStopped(){
+  recording = false;
+  clearInterval(recTimer);
+  document.getElementById('btnPlay').disabled = false;
+  document.getElementById('btnStop').disabled = true;
+  setAcqStatus('Grabación guardada. Ve a la pestaña "Archivos" para descargarla.', 'ok');
+  refreshFiles();
+}
+function setAcqStatus(txt, cls){
+  const el = document.getElementById('acqStatus');
+  el.textContent = txt;
+  el.className = 'statusline ' + (cls||'');
+}
+
+// ============================================================
+// ARCHIVOS — requieren la IP/host LOCAL del ESP32
+// ============================================================
+// Si la página se sirvió desde el propio ESP32 (IP local, .local, o
+// localhost), usamos rutas relativas directamente. Si se cargó desde
+// un hosting externo (GitHub Pages, etc.), pedimos la IP local al usuario.
+function isLocalHost(h){
+  return h === 'localhost' || h.endsWith('.local') ||
+         /^192\.168\.\d+\.\d+$/.test(h) || /^10\.\d+\.\d+\.\d+$/.test(h) ||
+         /^172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+$/.test(h);
+}
+let localBase = isLocalHost(location.hostname) ? '' : null;
+if(localBase === null){
+  const saved = localStorage_safe_get('nirs_local_addr');
+  if(saved) localBase = 'http://' + saved;
+}
+function localStorage_safe_get(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }
+function localStorage_safe_set(k,v){ try{ localStorage.setItem(k,v); }catch(e){} }
+
+function updateLocalAddrUI(){
+  const card = document.getElementById('localAddrCard');
+  card.style.display = isLocalHost(location.hostname) ? 'none' : 'block';
+}
+document.getElementById('btnSetLocalAddr').addEventListener('click', ()=>{
+  const v = document.getElementById('localAddr').value.trim();
+  if(!v) return;
+  localBase = 'http://' + v;
+  localStorage_safe_set('nirs_local_addr', v);
+  refreshFiles();
+});
+
+function refreshFiles(){
+  if(localBase === null){
+    document.getElementById('fileList').innerHTML =
+      '<li class="muted">Ingresa la IP local del ESP32 arriba para ver tus archivos.</li>';
+    return;
+  }
+  fetch(localBase+'/files').then(r=>r.json()).then(list=>{
+    const ul = document.getElementById('fileList');
+    if(!list.length){ ul.innerHTML = '<li class="muted">Sin archivos aún.</li>'; return; }
+    ul.innerHTML = '';
+    list.forEach(f=>{
+      const li = document.createElement('li');
+      li.innerHTML =
+        '<div><div class="fname">'+f.name+'</div><div class="fsize">'+(f.size/1024).toFixed(1)+' KB</div></div>' +
+        '<div class="flinks"><a class="dl" href="'+localBase+'/download?f='+encodeURIComponent(f.name)+'">Descargar</a> ' +
+        '<button class="btn danger" onclick="deleteFile(\''+f.name+'\')">Borrar</button></div>';
+      ul.appendChild(li);
+    });
+  }).catch(()=>{
+    document.getElementById('fileList').innerHTML =
+      '<li class="muted">No se pudo conectar al ESP32 en esa dirección (¿misma red WiFi?).</li>';
+  });
+  fetch(localBase+'/space').then(r=>r.json()).then(s=>{
+    const usedKB = (s.used/1024).toFixed(0), totKB=(s.total/1024).toFixed(0);
+    document.getElementById('spaceLabel').textContent = usedKB+' / '+totKB+' KB usados';
+    const pct = s.total ? Math.min(100, (s.used/s.total)*100) : 0;
+    document.getElementById('spaceBar').style.width = pct+'%';
+    document.getElementById('spaceBar').style.background = pct>85 ? 'var(--red)' : (pct>60 ? 'var(--orange)':'var(--accent)');
+  }).catch(()=>{});
+}
+function deleteFile(name){
+  if(!confirm('¿Borrar '+name+'?')) return;
+  fetch(localBase+'/delete?f='+encodeURIComponent(name)).then(()=>refreshFiles());
+}
+document.getElementById('btnRefreshFiles').addEventListener('click', refreshFiles);
+
+// ============================================================
+// PANEL DE SENSOR (S1 / S2) — generado dinámicamente
+// ============================================================
+function buildSensorTab(suffix, label){
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <div class="card">
+      <h2>${label} — Corriente LED</h2>
+      <div class="row"><label>IR (Slot A)</label>
+        <input type="number" id="ir_ma_${suffix}" value="50" step="0.1">
+        <button class="btn" onclick="applyCurrent('${suffix}','IR')">Aplicar</button>
+        <button class="btn secondary" onclick="ledOff('${suffix}','IR')">OFF</button>
+      </div>
+      <div class="row"><label>Rojo (Slot B)</label>
+        <input type="number" id="red_ma_${suffix}" value="50" step="0.1">
+        <button class="btn" onclick="applyCurrent('${suffix}','Rojo')">Aplicar</button>
+        <button class="btn secondary" onclick="ledOff('${suffix}','Rojo')">OFF</button>
+      </div>
+      <div class="muted" id="led_info_${suffix}">—</div>
+    </div>
+
+    <div class="card">
+      <h2>${label} — Ganancia AFE</h2>
+      <fieldset><legend>Slot A — IR</legend>
+        <div class="row"><label>R_F (TIA)</label>
+          <select id="rf_a_${suffix}">${opts(TIA_RF_MAP,'200 kΩ')}</select></div>
+        <div class="row"><label>R_INT</label>
+          <select id="rint_a_${suffix}">${opts(RINT_MAP,'400 kΩ (max SNR)')}</select></div>
+        <div class="row"><label>Pulsos</label>
+          <input type="number" id="pulse_a_${suffix}" value="8" min="1" max="255"></div>
+        <button class="btn" onclick="applyAfeSlot('${suffix}','A')">Aplicar Slot A</button>
+      </fieldset>
+      <fieldset><legend>Slot B — Rojo</legend>
+        <div class="row"><label>R_F (TIA)</label>
+          <select id="rf_b_${suffix}">${opts(TIA_RF_MAP,'200 kΩ')}</select></div>
+        <div class="row"><label>R_INT</label>
+          <select id="rint_b_${suffix}">${opts(RINT_MAP,'400 kΩ (max SNR)')}</select></div>
+        <div class="row"><label>Pulsos</label>
+          <input type="number" id="pulse_b_${suffix}" value="8" min="1" max="255"></div>
+        <button class="btn" onclick="applyAfeSlot('${suffix}','B')">Aplicar Slot B</button>
+      </fieldset>
+    </div>
+
+    <div class="card">
+      <h2>${label} — Frecuencia y promediado</h2>
+      <div class="row"><label>Frecuencia</label>
+        <select id="fsample_${suffix}">${opts(FSAMPLE_PRESETS,'100 Hz')}</select></div>
+      <div class="row"><label>Promediado</label>
+        <select id="avg_${suffix}">${opts(AVG_PRESETS,'Sin promediado (1x)')}</select></div>
+      <button class="btn wide" onclick="applyFsAvg('${suffix}')">Aplicar frecuencia y promediado</button>
+      <div class="muted" style="margin-top:6px;">Si promedias Nx, sube fSAMPLE Nx para mantener la tasa real de salida.</div>
+    </div>
+
+    <div class="card">
+      <h2>${label} — VBias / Chop</h2>
+      <div class="row"><label>VBias</label>
+        <input type="checkbox" id="vbias_${suffix}" style="flex:0;width:20px;">
+        <button class="btn secondary" onclick="applyVbias('${suffix}')">Aplicar</button>
+      </div>
+      <div class="muted">Chop Mode deshabilitado en firmware (config. incompleta causaba señal en 0).</div>
+    </div>
+
+    <div class="card">
+      <h2>${label} — Comando manual / estado</h2>
+      <div class="row">
+        <input type="text" id="manual_${suffix}" placeholder="Ej: STATUS${suffix}">
+        <button class="btn secondary" onclick="sendManual('${suffix}')">Enviar</button>
+      </div>
+      <button class="btn secondary wide" onclick="send('STATUS${suffix}')">Leer STATUS${suffix}</button>
+    </div>
+  `;
+  return wrap;
+}
+function opts(map, def){
+  return Object.keys(map).map(k => `<option value="${k}" ${k===def?'selected':''}>${k}</option>`).join('');
+}
+function applyCurrent(suffix, led){
+  const id = led==='IR' ? 'ir_ma_'+suffix : 'red_ma_'+suffix;
+  const ma = parseFloat(document.getElementById(id).value);
+  if(isNaN(ma) || ma<0){ alert('Ingresa una corriente válida en mA.'); return; }
+  const reg = convertMaToReg(ma);
+  send((led==='IR'?'IR':'Rojo') + suffix + '=0x' + reg.toString(16));
+  document.getElementById('led_info_'+suffix).textContent =
+    led+': '+(ma<=0?'OFF':getActualCurrentMa(reg)+' mA')+' (reg 0x'+reg.toString(16)+')';
+}
+function ledOff(suffix, led){
+  send((led==='IR'?'IR':'Rojo') + suffix + '=0x0000');
+}
+function applyAfeSlot(suffix, slot){
+  const sl = slot.toLowerCase();
+  const p = Math.max(1, Math.min(255, parseInt(document.getElementById('pulse_'+sl+'_'+suffix).value||'8',10)));
+  const rfKey   = document.getElementById('rf_'+sl+'_'+suffix).value;
+  const rintKey = document.getElementById('rint_'+sl+'_'+suffix).value;
+  const tiaReg   = buildTiaReg(rfKey, rintKey);
+  const pulseReg = (p<<8) | 0x18;
+  send('TIA_'+slot+suffix+'=0x'+tiaReg.toString(16));
+  send('PULSES_'+slot+suffix+'=0x'+pulseReg.toString(16));
+}
+function applyFsAvg(suffix){
+  const fsKey  = document.getElementById('fsample_'+suffix).value;
+  const avgKey = document.getElementById('avg_'+suffix).value;
+  send('FSAMPLE'+suffix+'=0x'+FSAMPLE_PRESETS[fsKey].toString(16));
+  send('AVG'+suffix+'=0x'+AVG_PRESETS[avgKey].toString(16));
+}
+function applyVbias(suffix){
+  const on = document.getElementById('vbias_'+suffix).checked ? '1' : '0';
+  send('VBIAS'+suffix+'='+on);
+}
+function sendManual(suffix){
+  const el = document.getElementById('manual_'+suffix);
+  const cmd = el.value.trim();
+  if(cmd) send(cmd);
+}
+
+// ============================================================
+// NAVEGACIÓN / INIT
+// ============================================================
+document.querySelectorAll('nav button').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    document.querySelectorAll('nav button').forEach(b=>b.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-'+btn.dataset.tab).classList.add('active');
+  });
+});
+
+window.addEventListener('load', ()=>{
+  document.getElementById('tab-s1').appendChild(buildSensorTab('_S1','Sensor 1'));
+  document.getElementById('tab-s2').appendChild(buildSensorTab('_S2','Sensor 2'));
+  initCharts();
+  animate();
+  updateLocalAddrUI();
+  mqttConnectJS();
+  refreshFiles();
+});
+</script>
+</body>
+</html>
