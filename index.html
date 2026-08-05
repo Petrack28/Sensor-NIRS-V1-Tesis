@@ -220,8 +220,8 @@ function buildTiaReg(rfKey, rintKey){
 // ⚠️ Deben coincidir EXACTAMENTE con los valores del firmware (.ino)
 const MQTT_HOST     = "981aa97ca1ed427699decebef462d689.s1.eu.hivemq.cloud";
 const MQTT_WSS_PORT = 8884;
-const MQTT_USER     = "sensornirs";
-const MQTT_PASS     = "sensornirs123";
+const MQTT_USER     = "nirs";
+const MQTT_PASS     = "nirs123";
 const TOPIC_CMD    = "nirs/cmd";
 const TOPIC_DATA   = "nirs/data";
 const TOPIC_STATUS = "nirs/status";
@@ -258,6 +258,7 @@ function send(cmd){
 }
 const dataLineRe = /^\d+,\d+,\d+,\d+$/;
 function onDataMessage(msg){
+  if(!viewingLive) return; // no dibujar nada hasta que el usuario le dé "Iniciar"
   if(dataLineRe.test(msg)){
     const [ir1,red1,ir2,red2] = msg.split(',').map(Number);
     pushSample(1, ir1, red1);
@@ -281,11 +282,19 @@ function logLine(s){
 // ============================================================
 // GRÁFICAS (canvas nativo, ventana deslizante de 10 s)
 // ============================================================
+let viewingLive = false; // true solo entre "Iniciar" y "Detener"
 const WINDOW_S = 10.0;
 const charts = {
-  1: {canvas:null, ctx:null, t:[], ir:[], red:[], t0:performance.now()},
-  2: {canvas:null, ctx:null, t:[], ir:[], red:[], t0:performance.now()},
+  1: {canvas:null, ctx:null, t:[], ir:[], red:[], t0:performance.now(), dirty:false},
+  2: {canvas:null, ctx:null, t:[], ir:[], red:[], t0:performance.now(), dirty:false},
 };
+function resetCharts(){
+  for(const id of [1,2]){
+    const ch = charts[id];
+    ch.t = []; ch.ir = []; ch.red = []; ch.t0 = performance.now(); ch.dirty = true;
+    if(ch.ctx) ch.ctx.clearRect(0,0,ch.canvas.clientWidth,ch.canvas.clientHeight);
+  }
+}
 function initCharts(){
   for(const id of [1,2]){
     const c = document.getElementById('chart'+id);
@@ -302,15 +311,25 @@ function pushSample(id, ir, red){
   ch.t.push(t); ch.ir.push(ir); ch.red.push(red);
   const tMin = t - WINDOW_S;
   while(ch.t.length && ch.t[0] < tMin){ ch.t.shift(); ch.ir.shift(); ch.red.shift(); }
+  ch.dirty = true;
+}
+function minMax(a, b){
+  let mn = Infinity, mx = -Infinity;
+  for(let i=0;i<a.length;i++){
+    if(a[i]<mn) mn=a[i]; if(a[i]>mx) mx=a[i];
+    if(b[i]<mn) mn=b[i]; if(b[i]>mx) mx=b[i];
+  }
+  return [mn, mx];
 }
 function drawChart(id){
   const ch = charts[id];
-  if(!ch.ctx || ch.t.length<2) return;
+  if(!ch.ctx || !ch.dirty || ch.t.length<2) return;
+  ch.dirty = false; // ya se dibujó con los datos actuales, no repetir hasta que llegue algo nuevo
   const ctx = ch.ctx;
   const W = ch.canvas.clientWidth, H = ch.canvas.clientHeight;
   ctx.clearRect(0,0,W,H);
   const tMax = ch.t[ch.t.length-1], tMin = tMax - WINDOW_S;
-  let mn = Math.min(...ch.ir, ...ch.red), mx = Math.max(...ch.ir, ...ch.red);
+  let [mn, mx] = minMax(ch.ir, ch.red);
   if(mx-mn < 10){ mx += 10; mn -= 10; }
   const pad = (mx-mn)*0.08; mn -= pad; mx += pad;
   const px = t => ((t-tMin)/(tMax-tMin||1))*W;
@@ -340,6 +359,8 @@ document.getElementById('acqMode').addEventListener('change', (e)=>{
 });
 document.getElementById('btnPlay').addEventListener('click', ()=>{
   const mode = document.getElementById('acqMode').value;
+  resetCharts();
+  viewingLive = true;
   if(mode === 'realtime'){
     setAcqStatus('Viendo en tiempo real (sin guardar).', 'ok');
     document.getElementById('btnPlay').disabled = true;
@@ -356,6 +377,7 @@ document.getElementById('btnPlay').addEventListener('click', ()=>{
 document.getElementById('btnStop').addEventListener('click', ()=>{
   if(recording){ send('RECORD_STOP'); }
   else {
+    viewingLive = false;
     document.getElementById('btnPlay').disabled = false;
     document.getElementById('btnStop').disabled = true;
     setAcqStatus('Listo.', '');
@@ -374,6 +396,7 @@ function onRecordStarted(name){
 }
 function onRecordStopped(){
   recording = false;
+  viewingLive = false;
   clearInterval(recTimer);
   document.getElementById('btnPlay').disabled = false;
   document.getElementById('btnStop').disabled = true;
