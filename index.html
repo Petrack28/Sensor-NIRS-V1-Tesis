@@ -43,6 +43,7 @@
   button.btn.danger{background:var(--red);color:#2a0000;}
   button.btn.wide{width:100%;padding:12px;font-size:15px;}
   button.btn:active{opacity:.8;}
+  button.btn:disabled{opacity:.5;cursor:default;}
   .btnrow{display:flex;gap:8px;flex-wrap:wrap;}
   canvas{width:100%;height:150px;background:#0c0e12;border-radius:8px;display:block;
          border:1px solid var(--border);}
@@ -56,16 +57,16 @@
        height:110px;overflow-y:auto;font-family:ui-monospace,Consolas,monospace;font-size:11px;
        color:var(--muted);white-space:pre-wrap;}
   .filelist{list-style:none;margin:0;padding:0;}
-  .filelist li{display:flex;align-items:center;justify-content:space-between;gap:8px;
-        padding:8px 0;border-bottom:1px solid var(--border);}
+  .filelist li{padding:8px 0;border-bottom:1px solid var(--border);}
   .filelist li:last-child{border-bottom:none;}
+  .filerow{display:flex;align-items:center;justify-content:space-between;gap:8px;}
   .fname{font-size:13px;word-break:break-all;}
   .fsize{font-size:11px;color:var(--muted);}
-  .flinks a, .flinks button{font-size:12px;padding:6px 9px;}
-  a.dl{background:var(--green);color:#062814;border-radius:6px;padding:6px 9px;
-       text-decoration:none;font-weight:700;font-size:12px;}
+  .flinks{display:flex;gap:6px;flex-shrink:0;}
+  .flinks button{font-size:12px;padding:6px 9px;}
+  .dlprogress{margin-top:6px;}
   .bar{height:6px;border-radius:3px;background:var(--panel2);overflow:hidden;margin-top:6px;}
-  .bar>div{height:100%;background:var(--accent);}
+  .bar>div{height:100%;background:var(--accent);transition:width .2s;}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
   .pill{display:inline-block;background:var(--panel2);border:1px solid var(--border);
         border-radius:999px;padding:2px 9px;font-size:11px;color:var(--muted);}
@@ -143,19 +144,6 @@
 
   <!-- ======================= TAB ARCHIVOS ======================= -->
   <section class="tab" id="tab-archivos">
-    <div class="card" id="localAddrCard" style="display:none;">
-      <h2>Conexión local (para descargar)</h2>
-      <div class="muted" style="margin-bottom:8px;">
-        Esta página se cargó desde internet, así que para listar/descargar
-        archivos necesito la dirección local del ESP32 — solo funciona si
-        tu teléfono está en la MISMA red WiFi que él.
-      </div>
-      <div class="row">
-        <label>IP o nirs32.local</label>
-        <input type="text" id="localAddr" placeholder="192.168.1.45 o nirs32.local">
-      </div>
-      <button class="btn wide" id="btnSetLocalAddr">Conectar localmente</button>
-    </div>
     <div class="card">
       <h2>Espacio en el ESP32</h2>
       <div class="muted" id="spaceLabel">-- / -- KB</div>
@@ -163,6 +151,10 @@
     </div>
     <div class="card">
       <h2>Archivos CSV / config</h2>
+      <div class="muted" style="margin-bottom:8px;">
+        Las descargas viajan por MQTT — funcionan desde cualquier lugar,
+        no necesitas estar en la misma red que el ESP32.
+      </div>
       <div class="btnrow" style="margin-bottom:10px;">
         <button class="btn secondary" id="btnRefreshFiles">↻ Actualizar lista</button>
       </div>
@@ -214,17 +206,19 @@ function buildTiaReg(rfKey, rintKey){
 }
 
 // ============================================================
-// MQTT (HiveMQ Cloud, vía WebSocket seguro — control y datos en vivo
-// desde cualquier lugar con internet, sin importar la red del ESP32)
+// MQTT (HiveMQ Cloud, vía WebSocket seguro — control, datos en vivo
+// Y AHORA TAMBIÉN DESCARGA DE ARCHIVOS, todo desde cualquier lugar
+// con internet, sin importar la red del ESP32)
 // ============================================================
 // ⚠️ Deben coincidir EXACTAMENTE con los valores del firmware (.ino)
 const MQTT_HOST     = "981aa97ca1ed427699decebef462d689.s1.eu.hivemq.cloud";
 const MQTT_WSS_PORT = 8884;
 const MQTT_USER     = "sensornirs";
 const MQTT_PASS     = "sensornirs123";
-const TOPIC_CMD    = "nirs/cmd";
-const TOPIC_DATA   = "nirs/data";
-const TOPIC_STATUS = "nirs/status";
+const TOPIC_CMD      = "nirs/cmd";
+const TOPIC_DATA     = "nirs/data";
+const TOPIC_STATUS   = "nirs/status";
+const TOPIC_FILEDATA = "nirs/filedata";
 
 let mqttClientJS = null, mqttConnected = false;
 function mqttConnectJS(){
@@ -238,14 +232,17 @@ function mqttConnectJS(){
     mqttConnected = true; setConn(true);
     mqttClientJS.subscribe(TOPIC_DATA);
     mqttClientJS.subscribe(TOPIC_STATUS);
+    mqttClientJS.subscribe(TOPIC_FILEDATA);
     send('STATUS');
+    refreshFiles();
   });
   mqttClientJS.on('close',  () => { mqttConnected = false; setConn(false); });
   mqttClientJS.on('error',  (e) => { console.error('MQTT error:', e); });
   mqttClientJS.on('message', (topic, payload) => {
     const msg = payload.toString();
-    if(topic === TOPIC_DATA)   onDataMessage(msg);
-    else                       onStatusMessage(msg);
+    if(topic === TOPIC_DATA)          onDataMessage(msg);
+    else if(topic === TOPIC_FILEDATA) onFileDataMessage(msg);
+    else                               onStatusMessage(msg);
   });
 }
 function setConn(ok){
@@ -268,8 +265,12 @@ function onDataMessage(msg){
 function onStatusMessage(msg){
   if(msg === "ONLINE" || msg === "OFFLINE"){ logLine("ESP32: " + msg); return; }
   if(msg.startsWith("FILES:")) { renderFiles(msg.substring(6)); return; }
-  if(msg.startsWith("ACK: RECORD_START:")) { onRecordStarted(msg.substring(19)); }
-  if(msg.startsWith("ACK: RECORD_STOP:"))  { onRecordStopped(); }
+  if(msg.startsWith("SPACE:")) { renderSpace(msg.substring(6)); return; }
+  if(msg.startsWith("ACK: RECORD_START:")) { onRecordStarted(msg.substring(18)); return; }
+  if(msg.startsWith("ACK: RECORD_STOP:"))  { onRecordStopped(); return; }
+  if(msg.startsWith("ACK: FILE_START:"))   { onFileStart(msg.substring(16)); return; }
+  if(msg.startsWith("ACK: FILE_END:"))     { onFileEnd(msg.substring(14)); return; }
+  if(msg.startsWith("ACK: DELETE_FILE:"))  { refreshFiles(); logLine(msg); return; }
   logLine(msg);
 }
 function logLine(s){
@@ -324,7 +325,7 @@ function minMax(a, b){
 function drawChart(id){
   const ch = charts[id];
   if(!ch.ctx || !ch.dirty || ch.t.length<2) return;
-  ch.dirty = false; // ya se dibujó con los datos actuales, no repetir hasta que llegue algo nuevo
+  ch.dirty = false;
   const ctx = ch.ctx;
   const W = ch.canvas.clientWidth, H = ch.canvas.clientHeight;
   ctx.clearRect(0,0,W,H);
@@ -334,7 +335,6 @@ function drawChart(id){
   const pad = (mx-mn)*0.08; mn -= pad; mx += pad;
   const px = t => ((t-tMin)/(tMax-tMin||1))*W;
   const py = v => H - ((v-mn)/(mx-mn||1))*H;
-  // grid
   ctx.strokeStyle = "#232833"; ctx.lineWidth=1;
   for(let i=0;i<=4;i++){ const y=H*i/4; ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
   function drawLine(arr, color){
@@ -410,71 +410,118 @@ function setAcqStatus(txt, cls){
 }
 
 // ============================================================
-// ARCHIVOS — requieren la IP/host LOCAL del ESP32
+// ARCHIVOS — listado, espacio y borrado por MQTT
 // ============================================================
-// Si la página se sirvió desde el propio ESP32 (IP local, .local, o
-// localhost), usamos rutas relativas directamente. Si se cargó desde
-// un hosting externo (GitHub Pages, etc.), pedimos la IP local al usuario.
-function isLocalHost(h){
-  return h === 'localhost' || h.endsWith('.local') ||
-         /^192\.168\.\d+\.\d+$/.test(h) || /^10\.\d+\.\d+\.\d+$/.test(h) ||
-         /^172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+$/.test(h);
-}
-let localBase = isLocalHost(location.hostname) ? '' : null;
-if(localBase === null){
-  const saved = localStorage_safe_get('nirs_local_addr');
-  if(saved) localBase = 'http://' + saved;
-}
-function localStorage_safe_get(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }
-function localStorage_safe_set(k,v){ try{ localStorage.setItem(k,v); }catch(e){} }
-
-function updateLocalAddrUI(){
-  const card = document.getElementById('localAddrCard');
-  card.style.display = isLocalHost(location.hostname) ? 'none' : 'block';
-}
-document.getElementById('btnSetLocalAddr').addEventListener('click', ()=>{
-  const v = document.getElementById('localAddr').value.trim();
-  if(!v) return;
-  localBase = 'http://' + v;
-  localStorage_safe_set('nirs_local_addr', v);
-  refreshFiles();
-});
-
 function refreshFiles(){
-  if(localBase === null){
-    document.getElementById('fileList').innerHTML =
-      '<li class="muted">Ingresa la IP local del ESP32 arriba para ver tus archivos.</li>';
-    return;
-  }
-  fetch(localBase+'/files').then(r=>r.json()).then(list=>{
-    const ul = document.getElementById('fileList');
-    if(!list.length){ ul.innerHTML = '<li class="muted">Sin archivos aún.</li>'; return; }
-    ul.innerHTML = '';
-    list.forEach(f=>{
-      const li = document.createElement('li');
-      li.innerHTML =
-        '<div><div class="fname">'+f.name+'</div><div class="fsize">'+(f.size/1024).toFixed(1)+' KB</div></div>' +
-        '<div class="flinks"><a class="dl" href="'+localBase+'/download?f='+encodeURIComponent(f.name)+'">Descargar</a> ' +
-        '<button class="btn danger" onclick="deleteFile(\''+f.name+'\')">Borrar</button></div>';
-      ul.appendChild(li);
-    });
-  }).catch(()=>{
-    document.getElementById('fileList').innerHTML =
-      '<li class="muted">No se pudo conectar al ESP32 en esa dirección (¿misma red WiFi?).</li>';
-  });
-  fetch(localBase+'/space').then(r=>r.json()).then(s=>{
-    const usedKB = (s.used/1024).toFixed(0), totKB=(s.total/1024).toFixed(0);
-    document.getElementById('spaceLabel').textContent = usedKB+' / '+totKB+' KB usados';
-    const pct = s.total ? Math.min(100, (s.used/s.total)*100) : 0;
-    document.getElementById('spaceBar').style.width = pct+'%';
-    document.getElementById('spaceBar').style.background = pct>85 ? 'var(--red)' : (pct>60 ? 'var(--orange)':'var(--accent)');
-  }).catch(()=>{});
+  send('LIST_FILES');
+  send('SPACE');
 }
+function renderSpace(str){
+  // "usados|total"
+  const [used, total] = str.split('|').map(Number);
+  const usedKB = (used/1024).toFixed(0), totKB = (total/1024).toFixed(0);
+  document.getElementById('spaceLabel').textContent = usedKB+' / '+totKB+' KB usados';
+  const pct = total ? Math.min(100, (used/total)*100) : 0;
+  document.getElementById('spaceBar').style.width = pct+'%';
+  document.getElementById('spaceBar').style.background = pct>85 ? 'var(--red)' : (pct>60 ? 'var(--orange)':'var(--accent)');
+}
+function renderFiles(str){
+  const ul = document.getElementById('fileList');
+  if(!str){ ul.innerHTML = '<li class="muted">Sin archivos aún.</li>'; return; }
+  const items = str.split(';').filter(Boolean).map(s=>{
+    const [name, size] = s.split('|');
+    return {name, size: parseInt(size,10)||0};
+  });
+  if(!items.length){ ul.innerHTML = '<li class="muted">Sin archivos aún.</li>'; return; }
+  ul.innerHTML = '';
+  items.forEach(f=>{
+    const li = document.createElement('li');
+    li.id = 'file_' + cssSafe(f.name);
+    li.innerHTML =
+      '<div class="filerow">' +
+        '<div><div class="fname">'+f.name+'</div><div class="fsize">'+(f.size/1024).toFixed(1)+' KB</div></div>' +
+        '<div class="flinks">' +
+          '<button class="btn" onclick="downloadFile(\''+f.name+'\')">Descargar</button>' +
+          '<button class="btn danger" onclick="deleteFile(\''+f.name+'\')">Borrar</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="dlprogress" id="progress_'+cssSafe(f.name)+'" style="display:none;">' +
+        '<div class="muted" id="progresslabel_'+cssSafe(f.name)+'">Descargando…</div>' +
+        '<div class="bar"><div id="progressbar_'+cssSafe(f.name)+'" style="width:0%"></div></div>' +
+      '</div>';
+    ul.appendChild(li);
+  });
+}
+function cssSafe(name){ return name.replace(/[^a-zA-Z0-9_-]/g,'_'); }
 function deleteFile(name){
   if(!confirm('¿Borrar '+name+'?')) return;
-  fetch(localBase+'/delete?f='+encodeURIComponent(name)).then(()=>refreshFiles());
+  send('DELETE_FILE:'+name);
 }
 document.getElementById('btnRefreshFiles').addEventListener('click', refreshFiles);
+
+// ============================================================
+// DESCARGA DE ARCHIVOS POR MQTT (chunks base64 → Blob → descarga)
+// ============================================================
+const pendingDownloads = {}; // name -> {totalBytes, totalChunks, chunks:[]}
+
+function downloadFile(name){
+  if(pendingDownloads[name]){ return; } // ya en curso
+  const prog = document.getElementById('progress_'+cssSafe(name));
+  if(prog) prog.style.display = 'block';
+  setProgress(name, 0, 'Solicitando…');
+  send('DOWNLOAD_FILE:' + name);
+}
+function setProgress(name, pct, label){
+  const bar = document.getElementById('progressbar_'+cssSafe(name));
+  const lbl = document.getElementById('progresslabel_'+cssSafe(name));
+  if(bar) bar.style.width = pct + '%';
+  if(lbl) lbl.textContent = label;
+}
+function onFileStart(rest){
+  // "<nombre>:<bytesTotal>:<totalChunks>"
+  const parts = rest.split(':');
+  const totalChunks = parseInt(parts.pop(), 10);
+  const totalBytes  = parseInt(parts.pop(), 10);
+  const name = parts.join(':'); // por si el nombre tuviera ':' (no debería, pero por seguridad)
+  pendingDownloads[name] = { totalBytes, totalChunks, chunks: new Array(totalChunks).fill(null), received: 0 };
+  setProgress(name, 0, 'Descargando… 0%');
+}
+function onFileDataMessage(msg){
+  // "<nombre>|<indice>|<totalChunks>|<base64>"
+  const i1 = msg.indexOf('|'); const i2 = msg.indexOf('|', i1+1); const i3 = msg.indexOf('|', i2+1);
+  if(i1<0||i2<0||i3<0) return;
+  const name = msg.substring(0, i1);
+  const idx  = parseInt(msg.substring(i1+1, i2), 10);
+  const b64  = msg.substring(i3+1);
+  const pd = pendingDownloads[name];
+  if(!pd) return; // llegó un chunk sin haber pedido el archivo (o ya terminó)
+  pd.chunks[idx] = b64;
+  pd.received++;
+  const pct = Math.round((pd.received / pd.totalChunks) * 100);
+  setProgress(name, pct, 'Descargando… ' + pct + '%');
+}
+function onFileEnd(name){
+  const pd = pendingDownloads[name];
+  if(!pd){ return; }
+  setProgress(name, 100, 'Ensamblando archivo…');
+  try{
+    const fullB64 = pd.chunks.join('');
+    const binaryStr = atob(fullB64);
+    const bytes = new Uint8Array(binaryStr.length);
+    for(let i=0;i<binaryStr.length;i++) bytes[i] = binaryStr.charCodeAt(i);
+    const blob = new Blob([bytes], {type:'application/octet-stream'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    setProgress(name, 100, 'Descargado ✓');
+  }catch(e){
+    console.error('Error ensamblando archivo:', e);
+    setProgress(name, 0, 'Error al ensamblar — intenta de nuevo');
+  }
+  delete pendingDownloads[name];
+}
 
 // ============================================================
 // PANEL DE SENSOR (S1 / S2) — generado dinámicamente
@@ -607,9 +654,7 @@ window.addEventListener('load', ()=>{
   document.getElementById('tab-s2').appendChild(buildSensorTab('_S2','Sensor 2'));
   initCharts();
   animate();
-  updateLocalAddrUI();
   mqttConnectJS();
-  refreshFiles();
 });
 </script>
 </body>
