@@ -70,6 +70,16 @@
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
   .pill{display:inline-block;background:var(--panel2);border:1px solid var(--border);
         border-radius:999px;padding:2px 9px;font-size:11px;color:var(--muted);}
+  .pill.green{color:var(--green);border-color:var(--green);}
+  .pill.blue{color:var(--accent);border-color:var(--accent);}
+  .pill.orange{color:var(--orange);border-color:var(--orange);}
+  .pill.red{color:var(--red);border-color:var(--red);}
+  .sensorHead{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;margin-bottom:10px;}
+  .metarow{display:flex;gap:6px;flex-wrap:wrap;}
+  .chanBlock{margin-bottom:12px;}
+  .chanBlock:last-child{margin-bottom:0;}
+  .chanLabel{display:flex;align-items:center;justify-content:space-between;font-size:12px;
+             color:var(--muted);margin-bottom:4px;}
   fieldset{border:1px solid var(--border);border-radius:10px;margin:0 0 10px;padding:8px 10px;}
   legend{font-size:12px;color:var(--muted);padding:0 4px;}
 </style>
@@ -94,20 +104,38 @@
   <section class="tab active" id="tab-principal">
 
     <div class="card">
-      <h2>Sensor 1 — IR / Rojo</h2>
-      <canvas id="chart1" width="600" height="150"></canvas>
-      <div class="legend">
-        <span><i class="sw" style="background:#4da3ff"></i>IR</span>
-        <span><i class="sw" style="background:#ff5c5c"></i>Rojo</span>
+      <div class="sensorHead">
+        <h2 style="margin:0;">Sensor 1</h2>
+        <div class="metarow">
+          <span class="pill" id="fs_S1">fSAMPLE: -- Hz</span>
+          <span class="pill" id="sci_S1">SCI: --</span>
+        </div>
+      </div>
+      <div class="chanBlock">
+        <div class="chanLabel"><span>Sensor 1 — IR</span><span class="pill" id="cv_S1_IR">CV: --</span></div>
+        <canvas id="chart_S1_IR" width="600" height="140"></canvas>
+      </div>
+      <div class="chanBlock">
+        <div class="chanLabel"><span>Sensor 1 — Rojo</span><span class="pill" id="cv_S1_Rojo">CV: --</span></div>
+        <canvas id="chart_S1_Rojo" width="600" height="140"></canvas>
       </div>
     </div>
 
     <div class="card">
-      <h2>Sensor 2 — IR / Rojo</h2>
-      <canvas id="chart2" width="600" height="150"></canvas>
-      <div class="legend">
-        <span><i class="sw" style="background:#4da3ff"></i>IR</span>
-        <span><i class="sw" style="background:#ff5c5c"></i>Rojo</span>
+      <div class="sensorHead">
+        <h2 style="margin:0;">Sensor 2</h2>
+        <div class="metarow">
+          <span class="pill" id="fs_S2">fSAMPLE: -- Hz</span>
+          <span class="pill" id="sci_S2">SCI: --</span>
+        </div>
+      </div>
+      <div class="chanBlock">
+        <div class="chanLabel"><span>Sensor 2 — IR</span><span class="pill" id="cv_S2_IR">CV: --</span></div>
+        <canvas id="chart_S2_IR" width="600" height="140"></canvas>
+      </div>
+      <div class="chanBlock">
+        <div class="chanLabel"><span>Sensor 2 — Rojo</span><span class="pill" id="cv_S2_Rojo">CV: --</span></div>
+        <canvas id="chart_S2_Rojo" width="600" height="140"></canvas>
       </div>
     </div>
 
@@ -258,10 +286,17 @@ function onDataMessage(msg){
   if(!viewingLive) return; // no dibujar nada hasta que el usuario le dé "Iniciar"
   if(dataLineRe.test(msg)){
     const [ir1,red1,ir2,red2] = msg.split(',').map(Number);
-    pushSample(1, ir1, red1);
-    pushSample(2, ir2, red2);
+    pushChannel('S1_IR', ir1);   pushChannel('S1_Rojo', red1);
+    pushChannel('S2_IR', ir2);   pushChannel('S2_Rojo', red2);
+    pushSciPair('S1', ir1, red1);
+    pushSciPair('S2', ir2, red2);
+    updateQuality();
   }
 }
+// Rastrea a qué sensor pertenecen las líneas de un bloque STATUS mientras
+// llegan (una por mensaje MQTT), para poder leer el fSAMPLE real del ESP32.
+let statusCtx = null;
+const FS_LINE_RE = /^FSAMPLE=0x[0-9a-fA-F]+ \((\d+) Hz\)$/;
 function onStatusMessage(msg){
   if(msg === "ONLINE" || msg === "OFFLINE"){ logLine("ESP32: " + msg); return; }
   if(msg.startsWith("FILES:")) { renderFiles(msg.substring(6)); return; }
@@ -271,6 +306,12 @@ function onStatusMessage(msg){
   if(msg.startsWith("ACK: FILE_START:"))   { onFileStart(msg.substring(16)); return; }
   if(msg.startsWith("ACK: FILE_END:"))     { onFileEnd(msg.substring(14)); return; }
   if(msg.startsWith("ACK: DELETE_FILE:"))  { refreshFiles(); logLine(msg); return; }
+  // --- Detección de fSAMPLE dentro de un bloque STATUS (---STATUS S1--- ... ---FIN---) ---
+  if(msg === "--- STATUS S1 ---"){ statusCtx = 'S1'; logLine(msg); return; }
+  if(msg === "--- STATUS S2 ---"){ statusCtx = 'S2'; logLine(msg); return; }
+  if(msg === "--- FIN ---"){ statusCtx = null; logLine(msg); return; }
+  const fsMatch = msg.match(FS_LINE_RE);
+  if(fsMatch && statusCtx){ setFsampleDisplay(statusCtx, parseInt(fsMatch[1],10)); }
   logLine(msg);
 }
 function logLine(s){
@@ -281,74 +322,202 @@ function logLine(s){
 }
 
 // ============================================================
-// GRÁFICAS (canvas nativo, ventana deslizante de 10 s)
+// GRÁFICAS — una por LED (canvas nativo, ventana deslizante de 10 s,
+// con ejes de tiempo y valor ADC)
 // ============================================================
 let viewingLive = false; // true solo entre "Iniciar" y "Detener"
 const WINDOW_S = 10.0;
-const charts = {
-  1: {canvas:null, ctx:null, t:[], ir:[], red:[], t0:performance.now(), dirty:false},
-  2: {canvas:null, ctx:null, t:[], ir:[], red:[], t0:performance.now(), dirty:false},
+const CHAN_KEYS = ['S1_IR','S1_Rojo','S2_IR','S2_Rojo'];
+const CHAN_COLOR = { S1_IR:'#4da3ff', S1_Rojo:'#ff5c5c', S2_IR:'#4da3ff', S2_Rojo:'#ff5c5c' };
+function newChannel(){ return {canvas:null, ctx:null, t:[], v:[], t0:performance.now(), dirty:false}; }
+const channels = {};
+CHAN_KEYS.forEach(k => channels[k] = newChannel());
+
+// Buffers pareados IR+Rojo por sensor, solo para el cálculo de SCI
+const sciBuf = {
+  S1: {t:[], ir:[], red:[], t0:performance.now()},
+  S2: {t:[], ir:[], red:[], t0:performance.now()},
 };
+
 function resetCharts(){
-  for(const id of [1,2]){
-    const ch = charts[id];
-    ch.t = []; ch.ir = []; ch.red = []; ch.t0 = performance.now(); ch.dirty = true;
+  CHAN_KEYS.forEach(k=>{
+    const ch = channels[k];
+    ch.t=[]; ch.v=[]; ch.t0=performance.now(); ch.dirty=true;
     if(ch.ctx) ch.ctx.clearRect(0,0,ch.canvas.clientWidth,ch.canvas.clientHeight);
-  }
+  });
+  ['S1','S2'].forEach(s=>{ sciBuf[s].t=[]; sciBuf[s].ir=[]; sciBuf[s].red=[]; sciBuf[s].t0=performance.now(); });
+  ['S1_IR','S1_Rojo','S2_IR','S2_Rojo'].forEach(k=>setPill('cv_'+k, 'CV: --', ''));
+  ['S1','S2'].forEach(s=>setPill('sci_'+s, 'SCI: --', ''));
 }
 function initCharts(){
-  for(const id of [1,2]){
-    const c = document.getElementById('chart'+id);
+  CHAN_KEYS.forEach(k=>{
+    const c = document.getElementById('chart_'+k);
     const ctx = c.getContext('2d');
     const ratio = window.devicePixelRatio || 1;
     c.width = c.clientWidth*ratio; c.height = c.clientHeight*ratio;
     ctx.scale(ratio, ratio);
-    charts[id].canvas = c; charts[id].ctx = ctx;
-  }
+    channels[k].canvas = c; channels[k].ctx = ctx;
+  });
 }
-function pushSample(id, ir, red){
-  const ch = charts[id];
+function pushChannel(key, val){
+  const ch = channels[key];
   const t = (performance.now() - ch.t0)/1000.0;
-  ch.t.push(t); ch.ir.push(ir); ch.red.push(red);
+  ch.t.push(t); ch.v.push(val);
   const tMin = t - WINDOW_S;
-  while(ch.t.length && ch.t[0] < tMin){ ch.t.shift(); ch.ir.shift(); ch.red.shift(); }
+  while(ch.t.length && ch.t[0] < tMin){ ch.t.shift(); ch.v.shift(); }
   ch.dirty = true;
 }
-function minMax(a, b){
-  let mn = Infinity, mx = -Infinity;
-  for(let i=0;i<a.length;i++){
-    if(a[i]<mn) mn=a[i]; if(a[i]>mx) mx=a[i];
-    if(b[i]<mn) mn=b[i]; if(b[i]>mx) mx=b[i];
-  }
-  return [mn, mx];
+function pushSciPair(sensor, ir, red){
+  const b = sciBuf[sensor];
+  const t = (performance.now() - b.t0)/1000.0;
+  b.t.push(t); b.ir.push(ir); b.red.push(red);
+  const tMin = t - WINDOW_S;
+  while(b.t.length && b.t[0] < tMin){ b.t.shift(); b.ir.shift(); b.red.shift(); }
 }
-function drawChart(id){
-  const ch = charts[id];
+
+function drawChannel(key){
+  const ch = channels[key];
   if(!ch.ctx || !ch.dirty || ch.t.length<2) return;
   ch.dirty = false;
   const ctx = ch.ctx;
   const W = ch.canvas.clientWidth, H = ch.canvas.clientHeight;
   ctx.clearRect(0,0,W,H);
+
+  // Márgenes para los ejes (valor ADC a la izquierda, tiempo abajo)
+  const ML = 46, MB = 16, MT = 4, MR = 6;
+  const plotW = Math.max(10, W-ML-MR), plotH = Math.max(10, H-MT-MB);
+
   const tMax = ch.t[ch.t.length-1], tMin = tMax - WINDOW_S;
-  let [mn, mx] = minMax(ch.ir, ch.red);
+  let mn = Math.min(...ch.v), mx = Math.max(...ch.v);
   if(mx-mn < 10){ mx += 10; mn -= 10; }
   const pad = (mx-mn)*0.08; mn -= pad; mx += pad;
-  const px = t => ((t-tMin)/(tMax-tMin||1))*W;
-  const py = v => H - ((v-mn)/(mx-mn||1))*H;
-  ctx.strokeStyle = "#232833"; ctx.lineWidth=1;
-  for(let i=0;i<=4;i++){ const y=H*i/4; ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
-  function drawLine(arr, color){
-    ctx.strokeStyle = color; ctx.lineWidth = 1.6; ctx.beginPath();
-    for(let i=0;i<ch.t.length;i++){
-      const x = px(ch.t[i]), y = py(arr[i]);
-      if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
-    }
-    ctx.stroke();
+
+  const px = t => ML + ((t-tMin)/(tMax-tMin||1))*plotW;
+  const py = v => MT + plotH - ((v-mn)/(mx-mn||1))*plotH;
+
+  // Cuadrícula horizontal (valor ADC) con etiquetas
+  ctx.strokeStyle = "#232833"; ctx.lineWidth = 1;
+  ctx.fillStyle = "#6b7280"; ctx.font = "10px ui-monospace,Consolas,monospace";
+  ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  const NY = 4;
+  for(let i=0;i<=NY;i++){
+    const v = mn + (mx-mn)*(1 - i/NY);
+    const y = MT + (plotH*i/NY);
+    ctx.beginPath(); ctx.moveTo(ML,y); ctx.lineTo(ML+plotW,y); ctx.stroke();
+    ctx.fillText(Math.round(v).toString(), ML-4, y);
   }
-  drawLine(ch.ir, "#4da3ff");
-  drawLine(ch.red, "#ff5c5c");
+  // Cuadrícula vertical (tiempo relativo, segundos) con etiquetas
+  ctx.textAlign = "center"; ctx.textBaseline = "top";
+  const NX = 5;
+  for(let i=0;i<=NX;i++){
+    const tRel = -WINDOW_S + (WINDOW_S*i/NX); // de -10s a 0s
+    const x = ML + (plotW*i/NX);
+    ctx.strokeStyle = "#1c2028";
+    ctx.beginPath(); ctx.moveTo(x,MT); ctx.lineTo(x,MT+plotH); ctx.stroke();
+    ctx.fillText(tRel.toFixed(1)+'s', x, MT+plotH+2);
+  }
+
+  // Línea de datos
+  ctx.strokeStyle = CHAN_COLOR[key]; ctx.lineWidth = 1.6; ctx.beginPath();
+  for(let i=0;i<ch.t.length;i++){
+    const x = px(ch.t[i]), y = py(ch.v[i]);
+    if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
 }
-function animate(){ drawChart(1); drawChart(2); requestAnimationFrame(animate); }
+function animate(){ CHAN_KEYS.forEach(drawChannel); requestAnimationFrame(animate); }
+
+// ============================================================
+// CALIDAD DE SEÑAL — CV y SCI (idéntico a la GUI de Python original)
+// ============================================================
+function calcCV(arr){
+  if(arr.length < 10) return null;
+  const m = arr.reduce((a,b)=>a+b,0) / arr.length;
+  if(m === 0) return null;
+  const variance = arr.reduce((a,b)=>a+(b-m)*(b-m),0) / arr.length;
+  return (Math.sqrt(variance) / m) * 100.0;
+}
+function cvLabel(cv){
+  if(cv === null) return ['--','']; 
+  if(cv < 2.0)  return ['MUY ESTABLE','green'];
+  if(cv < 5.0)  return ['ESTABLE','blue'];
+  if(cv < 15.0) return ['VARIABLE','orange'];
+  return ['INESTABLE','red'];
+}
+// Filtro pasa-banda 0.5–3 Hz (banda cardíaca) aplicado hacia adelante y
+// hacia atrás (estilo filtfilt) para fase cero — aproximación ligera del
+// Butterworth+filtfilt de scipy que usa el pipeline offline; suficiente
+// para un indicador EN VIVO. El análisis definitivo sigue haciéndose con
+// los datos completos grabados, no con este valor de pantalla.
+function bandpassFiltfilt(arr, fs){
+  const rcHp = 1/(2*Math.PI*0.5), rcLp = 1/(2*Math.PI*3.0);
+  const dt = 1/fs;
+  const aHp = rcHp/(rcHp+dt), aLp = dt/(rcLp+dt);
+  function hp(x){
+    const y = new Array(x.length); y[0]=0;
+    for(let i=1;i<x.length;i++) y[i] = aHp*(y[i-1]+x[i]-x[i-1]);
+    return y;
+  }
+  function lp(x){
+    const y = new Array(x.length); y[0]=x[0];
+    for(let i=1;i<x.length;i++) y[i] = y[i-1]+aLp*(x[i]-y[i-1]);
+    return y;
+  }
+  function passOnce(x){ return lp(hp(x)); }
+  const fwd = passOnce(arr);
+  const rev = passOnce(fwd.slice().reverse());
+  return rev.reverse();
+}
+function calcSCI(irArr, redArr, tArr){
+  const n = irArr.length;
+  if(n < 20 || redArr.length < 20) return null;
+  let fs = 10.0;
+  if(tArr && tArr.length >= 2){
+    const dur = tArr[tArr.length-1] - tArr[0];
+    if(dur > 0) fs = n/dur;
+  }
+  const nMin = Math.floor(fs*4);
+  if(n < nMin) return null;
+  const a = bandpassFiltfilt(irArr, fs);
+  const b = bandpassFiltfilt(redArr, fs);
+  let num=0, denA=0, denB=0;
+  for(let i=0;i<n;i++){ num += a[i]*b[i]; denA += a[i]*a[i]; denB += b[i]*b[i]; }
+  const den = Math.sqrt(denA*denB);
+  if(den === 0) return null;
+  return Math.max(-1, Math.min(1, num/den));
+}
+function sciLabel(sci){
+  if(sci === null) return ['--',''];
+  if(sci >= 0.80) return ['BUENA','green'];
+  if(sci >= 0.75) return ['MEDIA','orange'];
+  return ['BAJA','red'];
+}
+function setPill(id, text, cls){
+  const el = document.getElementById(id);
+  if(!el) return;
+  el.textContent = text;
+  el.className = 'pill' + (cls ? ' '+cls : '');
+}
+let lastQualityUpdate = 0;
+function updateQuality(){
+  const now = performance.now();
+  if(now - lastQualityUpdate < 500) return; // recalcular cada ~0.5s, no en cada muestra
+  lastQualityUpdate = now;
+  CHAN_KEYS.forEach(k=>{
+    const cv = calcCV(channels[k].v);
+    const [lbl, cls] = cvLabel(cv);
+    setPill('cv_'+k, cv===null ? 'CV: --' : `CV: ${cv.toFixed(1)}% ${lbl}`, cls);
+  });
+  ['S1','S2'].forEach(s=>{
+    const b = sciBuf[s];
+    const sci = calcSCI(b.ir, b.red, b.t);
+    const [lbl, cls] = sciLabel(sci);
+    setPill('sci_'+s, sci===null ? 'SCI: --' : `SCI: ${sci.toFixed(2)} ${lbl}`, cls);
+  });
+}
+function setFsampleDisplay(sensor, hz){
+  setPill('fs_'+sensor, 'fSAMPLE: '+hz+' Hz', '');
+}
 
 // ============================================================
 // ADQUISICIÓN (tiempo real / temporizado con grabación CSV)
@@ -626,6 +795,8 @@ function applyFsAvg(suffix){
   const avgKey = document.getElementById('avg_'+suffix).value;
   send('FSAMPLE'+suffix+'=0x'+FSAMPLE_PRESETS[fsKey].toString(16));
   send('AVG'+suffix+'=0x'+AVG_PRESETS[avgKey].toString(16));
+  const hzMatch = fsKey.match(/(\d+)/);
+  if(hzMatch) setFsampleDisplay(suffix.replace(/^_/,''), parseInt(hzMatch[1],10));
 }
 function applyVbias(suffix){
   const on = document.getElementById('vbias_'+suffix).checked ? '1' : '0';
