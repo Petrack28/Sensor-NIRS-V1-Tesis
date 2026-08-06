@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>NIRS 2.0 — Control</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.3.4/mqtt.min.js"></script>
 <style>
   :root{
     --bg:#12151a; --panel:#1b1f27; --panel2:#232833; --border:#323846;
@@ -88,7 +87,10 @@
 
 <header>
   <h1>NIRS 2.0</h1>
-  <div id="connLabel"><span class="dot" id="connDot"></span><span id="connText">Conectando…</span></div>
+  <div style="display:flex;align-items:center;gap:8px;">
+    <div id="connLabel"><span class="dot" id="connDot"></span><span id="connText">Desconectado</span></div>
+    <button class="btn" id="btnBleConnect" style="padding:6px 10px;font-size:12px;">🔗 Conectar</button>
+  </div>
 </header>
 
 <nav>
@@ -180,8 +182,8 @@
     <div class="card">
       <h2>Archivos CSV / config</h2>
       <div class="muted" style="margin-bottom:8px;">
-        Las descargas viajan por MQTT — funcionan desde cualquier lugar,
-        no necesitas estar en la misma red que el ESP32.
+        Las descargas viajan por Bluetooth — necesitas estar conectado
+        (pestaña de arriba) y cerca del ESP32.
       </div>
       <div class="btnrow" style="margin-bottom:10px;">
         <button class="btn secondary" id="btnRefreshFiles">↻ Actualizar lista</button>
@@ -234,54 +236,84 @@ function buildTiaReg(rfKey, rintKey){
 }
 
 // ============================================================
-// MQTT (HiveMQ Cloud, vía WebSocket seguro — control, datos en vivo
-// Y AHORA TAMBIÉN DESCARGA DE ARCHIVOS, todo desde cualquier lugar
-// con internet, sin importar la red del ESP32)
+// BLUETOOTH (Web Bluetooth API — Chrome en Android). Reemplaza a MQTT:
+// control, datos en vivo y descarga de archivos, todo 100% local, sin
+// internet ni nube. La página se cargó una vez desde donde sea (datos
+// móviles, WiFi, GitHub Pages) — desde aquí en adelante todo es BLE.
 // ============================================================
-// ⚠️ Deben coincidir EXACTAMENTE con los valores del firmware (.ino)
-const MQTT_HOST     = "981aa97ca1ed427699decebef462d689.s1.eu.hivemq.cloud";
-const MQTT_WSS_PORT = 8884;
-const MQTT_USER     = "sensornirs";
-const MQTT_PASS     = "sensornirs123";
-const TOPIC_CMD      = "nirs/cmd";
-const TOPIC_DATA     = "nirs/data";
-const TOPIC_STATUS   = "nirs/status";
-const TOPIC_FILEDATA = "nirs/filedata";
+const NUS_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const NUS_RX_UUID      = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; // app escribe aquí
+const NUS_TX_UUID      = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; // ESP32 notifica aquí
 
-let mqttClientJS = null, mqttConnected = false;
-function mqttConnectJS(){
-  const url = `wss://${MQTT_HOST}:${MQTT_WSS_PORT}/mqtt`;
-  mqttClientJS = mqtt.connect(url, {
-    username: MQTT_USER, password: MQTT_PASS,
-    clientId: "nirs_web_" + Math.random().toString(16).slice(2),
-    reconnectPeriod: 2000,
-  });
-  mqttClientJS.on('connect', () => {
-    mqttConnected = true; setConn(true);
-    mqttClientJS.subscribe(TOPIC_DATA);
-    mqttClientJS.subscribe(TOPIC_STATUS);
-    mqttClientJS.subscribe(TOPIC_FILEDATA);
+let bleDevice = null, bleServer = null, bleRxChar = null, bleTxChar = null;
+let bleConnected = false;
+let bleLineBuffer = ""; // acumula bytes del stream BLE hasta encontrar '\n'
+
+async function bleConnectFlow(){
+  if(!navigator.bluetooth){
+    alert('Este navegador no soporta Web Bluetooth. Usa Chrome en Android.');
+    return;
+  }
+  try{
+    bleDevice = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [NUS_SERVICE_UUID] }],
+      optionalServices: [NUS_SERVICE_UUID]
+    });
+    bleDevice.addEventListener('gattserverdisconnected', onBleDisconnected);
+    bleServer = await bleDevice.gatt.connect();
+    const service = await bleServer.getPrimaryService(NUS_SERVICE_UUID);
+    bleRxChar = await service.getCharacteristic(NUS_RX_UUID); // escritura (app -> ESP32)
+    bleTxChar = await service.getCharacteristic(NUS_TX_UUID); // notify (ESP32 -> app)
+    await bleTxChar.startNotifications();
+    bleTxChar.addEventListener('characteristicvaluechanged', onBleNotify);
+
+    bleConnected = true; setConn(true);
     send('STATUS');
     refreshFiles();
-  });
-  mqttClientJS.on('close',  () => { mqttConnected = false; setConn(false); });
-  mqttClientJS.on('error',  (e) => { console.error('MQTT error:', e); });
-  mqttClientJS.on('message', (topic, payload) => {
-    const msg = payload.toString();
-    if(topic === TOPIC_DATA)          onDataMessage(msg);
-    else if(topic === TOPIC_FILEDATA) onFileDataMessage(msg);
-    else                               onStatusMessage(msg);
-  });
+  }catch(e){
+    console.error('Error BLE:', e);
+    logLine('ERR: no se pudo conectar por Bluetooth — ' + e.message);
+  }
+}
+function onBleDisconnected(){
+  bleConnected = false; setConn(false);
+  logLine('Bluetooth desconectado.');
+}
+function onBleNotify(event){
+  const bytes = new Uint8Array(event.target.value.buffer);
+  const text = new TextDecoder().decode(bytes);
+  bleLineBuffer += text;
+  let idx;
+  while((idx = bleLineBuffer.indexOf('\n')) >= 0){
+    const line = bleLineBuffer.substring(0, idx).trim();
+    bleLineBuffer = bleLineBuffer.substring(idx + 1);
+    if(line.length > 0) onLine(line);
+  }
 }
 function setConn(ok){
   document.getElementById('connDot').classList.toggle('on', ok);
-  document.getElementById('connText').textContent = ok ? "Conectado (MQTT)" : "Desconectado — reintentando…";
+  document.getElementById('connText').textContent = ok ? "Conectado (Bluetooth)" : "Desconectado";
+  document.getElementById('btnBleConnect').textContent = ok ? "🔗 Conectado" : "🔗 Conectar";
 }
-function send(cmd){
-  if(mqttClientJS && mqttConnected) mqttClientJS.publish(TOPIC_CMD, cmd);
+async function send(cmd){
   logLine("> " + cmd);
+  if(!bleConnected || !bleRxChar) return;
+  try{
+    await bleRxChar.writeValue(new TextEncoder().encode(cmd + "\n"));
+  }catch(e){
+    console.error('Error enviando por BLE:', e);
+  }
 }
+document.getElementById('btnBleConnect').addEventListener('click', bleConnectFlow);
+
+// Un solo stream de líneas — se distingue el tipo de mensaje por su
+// contenido (antes viajaban en tópicos MQTT separados: data/status/filedata).
 const dataLineRe = /^\d+,\d+,\d+,\d+$/;
+function onLine(line){
+  if(dataLineRe.test(line)){ onDataMessage(line); return; }
+  if(line.startsWith("FILEDATA:")){ onFileDataMessage(line.substring(9)); return; }
+  onStatusMessage(line);
+}
 function onDataMessage(msg){
   if(!viewingLive) return; // no dibujar nada hasta que el usuario le dé "Iniciar"
   if(dataLineRe.test(msg)){
@@ -294,7 +326,7 @@ function onDataMessage(msg){
   }
 }
 // Rastrea a qué sensor pertenecen las líneas de un bloque STATUS mientras
-// llegan (una por mensaje MQTT), para poder leer el fSAMPLE real del ESP32.
+// llegan, para poder leer el fSAMPLE real del ESP32.
 let statusCtx = null;
 const FS_LINE_RE = /^FSAMPLE=0x[0-9a-fA-F]+ \((\d+) Hz\)$/;
 function onStatusMessage(msg){
@@ -825,7 +857,12 @@ window.addEventListener('load', ()=>{
   document.getElementById('tab-s2').appendChild(buildSensorTab('_S2','Sensor 2'));
   initCharts();
   animate();
-  mqttConnectJS();
+  setConn(false);
+  if(!navigator.bluetooth){
+    logLine('Este navegador no soporta Web Bluetooth. Usa Chrome en Android.');
+  } else {
+    logLine('Toca "🔗 Conectar" arriba para vincular con el ESP32 por Bluetooth.');
+  }
 });
 </script>
 </body>
