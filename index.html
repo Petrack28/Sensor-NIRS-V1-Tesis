@@ -312,9 +312,18 @@ async function bleConnectFlow(){
     logLine('ERR: no se pudo conectar por Bluetooth — ' + e.message);
   }
 }
+function bleDisconnect(){
+  if(bleDevice && bleDevice.gatt.connected){
+    bleDevice.gatt.disconnect(); // dispara 'gattserverdisconnected' -> onBleDisconnected()
+  }
+}
 function onBleDisconnected(){
   bleConnected = false; setConn(false);
   logLine('Bluetooth desconectado.');
+}
+function bleToggleConnection(){
+  if(bleConnected) bleDisconnect();
+  else bleConnectFlow();
 }
 function onBleNotify(event){
   const bytes = new Uint8Array(event.target.value.buffer);
@@ -330,7 +339,9 @@ function onBleNotify(event){
 function setConn(ok){
   document.getElementById('connDot').classList.toggle('on', ok);
   document.getElementById('connText').textContent = ok ? "Conectado (Bluetooth)" : "Desconectado";
-  document.getElementById('btnBleConnect').textContent = ok ? "🔗 Conectado" : "🔗 Conectar";
+  const btn = document.getElementById('btnBleConnect');
+  btn.textContent = ok ? "🔌 Desconectar" : "🔗 Conectar";
+  btn.classList.toggle('secondary', ok);
 }
 // Cola de envío BLE — evita que dos writeValue() se disparen a la vez.
 // Varias funciones (applyAfeSlot, applyFsAvg, etc.) llaman a send() más
@@ -353,7 +364,7 @@ function send(cmd){
   });
   return sendQueue;
 }
-document.getElementById('btnBleConnect').addEventListener('click', bleConnectFlow);
+document.getElementById('btnBleConnect').addEventListener('click', bleToggleConnection);
 
 // Un solo stream de líneas — se distingue el tipo de mensaje por su
 // contenido (antes viajaban en tópicos MQTT separados: data/status/filedata).
