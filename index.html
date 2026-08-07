@@ -461,6 +461,7 @@ function applyStatusToUI(sensorKey, buf){
     const on = buf.LED_DIS !== undefined ? !(buf.LED_DIS & (1 << 9)) : undefined;
     updateLedUi(suf, 'red', on, getActualCurrentMa(buf.LED2));
   }
+  if(buf.LED1 !== undefined || buf.LED2 !== undefined) updateLedInfoLabel(suf);
 
   if(buf.TIA_A !== undefined){
     const d = decodeTiaReg(buf.TIA_A);
@@ -510,6 +511,20 @@ function updateLedUi(suf, led, on, ma){
 
   const devInput = document.getElementById((led === 'ir' ? 'ir_ma_' : 'red_ma_')+suf);
   if(devInput) devInput.value = maRounded;
+}
+// Label combinado (Modo Dev) con el estado real de AMBOS LEDs de un
+// sensor — antes solo se actualizaba al hacer clic manual en "Aplicar"
+// (y solo mostraba el último LED tocado); ahora también se llena al
+// sincronizar con STATUS, mostrando IR y Rojo juntos.
+function updateLedInfoLabel(suf){
+  const el = document.getElementById('led_info_'+suf);
+  if(!el) return;
+  const ir  = simpleLedState[suf+'_ir'];
+  const red = simpleLedState[suf+'_red'];
+  const parts = [];
+  if(ir)  parts.push('IR: '   + (ir.on  ? ir.ma  + ' mA' : 'OFF'));
+  if(red) parts.push('Rojo: ' + (red.on ? red.ma + ' mA' : 'OFF'));
+  if(parts.length) el.textContent = parts.join('  |  ');
 }
 function logLine(s){
   const el = document.getElementById('log');
