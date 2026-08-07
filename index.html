@@ -110,6 +110,7 @@
         <h2 style="margin:0;">Sensor 1</h2>
         <div class="metarow">
           <span class="pill" id="fs_S1">fSAMPLE: -- Hz</span>
+          <span class="pill" id="tasa_S1">Tasa real: -- Hz</span>
           <span class="pill" id="sci_S1">SCI: --</span>
         </div>
       </div>
@@ -128,6 +129,7 @@
         <h2 style="margin:0;">Sensor 2</h2>
         <div class="metarow">
           <span class="pill" id="fs_S2">fSAMPLE: -- Hz</span>
+          <span class="pill" id="tasa_S2">Tasa real: -- Hz</span>
           <span class="pill" id="sci_S2">SCI: --</span>
         </div>
       </div>
@@ -552,6 +554,41 @@ function setFsampleDisplay(sensor, hz){
 }
 
 // ============================================================
+// TASA DE SALIDA REAL — idéntico a calc_max_fsample_hz/calc_tasa_salida
+// de la GUI de Python original. El registro fSAMPLE (0x12) NO cambia
+// con el promediado (son registros independientes, confirmado en el
+// datasheet ADPD1080) — lo que sí cambia es la tasa REAL a la que
+// llegan datos nuevos: fSAMPLE_efectivo/N. Esto es justo lo que la
+// GUI original mostraba como "Frec. salida", separado de "fSAMPLE".
+function calcMaxFsampleHz(pa, pb, periodUs=24){
+  const total = 25 + pa*periodUs + 68 + 25 + pb*periodUs + 20 + 222;
+  return total > 0 ? 1000000.0/total : 0;
+}
+function calcTasaSalida(fsHz, avgFactor, pa, pb){
+  const fmax = calcMaxFsampleHz(pa, pb);
+  const base = Math.min(fsHz, fmax);
+  return base / Math.max(avgFactor, 1);
+}
+// Recalcula y muestra la tasa real de un sensor a partir de los
+// valores que hay AHORA MISMO en sus controles (fSAMPLE, promedio,
+// pulsos A/B) — se llama después de aplicar cualquiera de los tres.
+function updateTasaSalida(suffix){
+  const sl = suffix.replace(/^_/,'');
+  const fsKeyEl  = document.getElementById('fsample_'+suffix);
+  const avgKeyEl = document.getElementById('avg_'+suffix);
+  const paEl     = document.getElementById('pulse_a_'+suffix);
+  const pbEl     = document.getElementById('pulse_b_'+suffix);
+  if(!fsKeyEl || !avgKeyEl || !paEl || !pbEl) return;
+  const fsHz  = FSAMPLE_PRESETS[fsKeyEl.value] ? hzFromFsampleReg(FSAMPLE_PRESETS[fsKeyEl.value]) : 0;
+  const avgF  = 2 ** ((AVG_PRESETS[avgKeyEl.value] >> 4) & 0x7);
+  const pa    = Math.max(1, parseInt(paEl.value||'8',10));
+  const pb    = Math.max(1, parseInt(pbEl.value||'8',10));
+  const tasa  = calcTasaSalida(fsHz, avgF, pa, pb);
+  setPill('tasa_'+sl, 'Tasa real: '+tasa.toFixed(1)+' Hz', tasa < fsHz*0.9 ? 'orange' : 'green');
+}
+function hzFromFsampleReg(reg){ return reg ? 32000.0/(reg*4) : 0; }
+
+// ============================================================
 // ADQUISICIÓN (tiempo real / temporizado con grabación CSV)
 // ============================================================
 let recording = false, recTimer = null, recRemaining = 0;
@@ -821,6 +858,7 @@ function applyAfeSlot(suffix, slot){
   const pulseReg = (p<<8) | 0x18;
   send('TIA_'+slot+suffix+'=0x'+tiaReg.toString(16));
   send('PULSES_'+slot+suffix+'=0x'+pulseReg.toString(16));
+  updateTasaSalida(suffix);
 }
 function applyFsAvg(suffix){
   const fsKey  = document.getElementById('fsample_'+suffix).value;
@@ -829,6 +867,7 @@ function applyFsAvg(suffix){
   send('AVG'+suffix+'=0x'+AVG_PRESETS[avgKey].toString(16));
   const hzMatch = fsKey.match(/(\d+)/);
   if(hzMatch) setFsampleDisplay(suffix.replace(/^_/,''), parseInt(hzMatch[1],10));
+  updateTasaSalida(suffix);
 }
 function applyVbias(suffix){
   const on = document.getElementById('vbias_'+suffix).checked ? '1' : '0';
