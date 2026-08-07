@@ -491,6 +491,12 @@ void printStatus(TwoWire &bus, SensorState &s, const char* name) {
   btPrint("PULSES_B=0x"); btPrintlnHex(readReg(bus, REG_SLOTB_PULSES));
   btPrint("LED1=0x");     btPrintlnHex(readReg(bus, REG_ILED1_COARSE));
   btPrint("LED2=0x");     btPrintlnHex(readReg(bus, REG_ILED2_COARSE));
+  // LED_DIS y VBIAS no son registros derivables de una sola lectura I2C de
+  // forma limpia (LED_DIS sí, pero VBias se maneja como estado en RAM) —
+  // se reportan desde el SensorState en memoria para que la app web pueda
+  // reconstruir el estado ON/OFF real de los LEDs y de VBias al conectar.
+  btPrint("LED_DIS=0x");  btPrintlnHex(s.led_dis);
+  btPrint("VBIAS=");      btPrintln(s.vbias ? 1 : 0);
   btPrint("Loop period="); btPrint(g_loop_period_us); btPrintln(" us");
   btPrintln("--- FIN ---");
 }

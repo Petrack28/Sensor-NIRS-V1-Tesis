@@ -271,6 +271,20 @@ function getActualCurrentMa(reg){
 function buildTiaReg(rfKey, rintKey){
   return AFE_BASE_CONFIG | (RINT_MAP[rintKey]||0) | (TIA_RF_MAP[rfKey]||0);
 }
+// Inversas de los mapeos de arriba — para reconstruir la UI a partir de
+// los valores de registro reales que reporta el ESP32 (comando STATUS).
+function reverseLookup(map, value){
+  for(const k in map){ if(map[k] === value) return k; }
+  return null;
+}
+function decodeTiaReg(reg){
+  return {
+    rfKey:   reverseLookup(TIA_RF_MAP, reg & 0x3)   || '200 kΩ',
+    rintKey: reverseLookup(RINT_MAP,   reg & 0x300) || '400 kΩ (max SNR)',
+  };
+}
+function setSelectValue(id, value){ const el = document.getElementById(id); if(el && value !== null) el.value = value; }
+function setInputValue(id, value){ const el = document.getElementById(id); if(el) el.value = value; }
 
 // ============================================================
 // BLUETOOTH (Web Bluetooth API — Chrome en Android). Reemplaza a MQTT:
@@ -386,9 +400,17 @@ function onDataMessage(msg){
   }
 }
 // Rastrea a qué sensor pertenecen las líneas de un bloque STATUS mientras
-// llegan, para poder leer el fSAMPLE real del ESP32.
+// llegan (---STATUS S1--- ... ---FIN---), acumulando todos sus campos en
+// statusBuf. Al llegar ---FIN--- se aplican de golpe a la UI (simple +
+// Modo Dev) — así, al conectar (send('STATUS') en bleConnectFlow), los
+// controles reflejan la config REAL guardada en el ESP32 en vez de
+// quedarse en los valores por defecto del HTML, aunque el sensor haya
+// arrancado con una configuración distinta cargada desde flash.
 let statusCtx = null;
-const FS_LINE_RE = /^FSAMPLE=0x[0-9a-fA-F]+ \((\d+) Hz\)$/;
+let statusBuf = {};
+const FS_LINE_RE  = /^FSAMPLE=0x([0-9a-fA-F]+) \((\d+) Hz\)$/;
+const VB_LINE_RE  = /^VBIAS=(\d)$/;
+const HEX_LINE_RE = /^([A-Z_0-9]+)=0x([0-9a-fA-F]+)$/;
 function onStatusMessage(msg){
   if(msg === "ONLINE" || msg === "OFFLINE"){ logLine("ESP32: " + msg); return; }
   if(msg.startsWith("FILES:")) { renderFiles(msg.substring(6)); return; }
@@ -398,13 +420,96 @@ function onStatusMessage(msg){
   if(msg.startsWith("ACK: FILE_START:"))   { onFileStart(msg.substring(16)); return; }
   if(msg.startsWith("ACK: FILE_END:"))     { onFileEnd(msg.substring(14)); return; }
   if(msg.startsWith("ACK: DELETE_FILE:"))  { refreshFiles(); logLine(msg); return; }
-  // --- Detección de fSAMPLE dentro de un bloque STATUS (---STATUS S1--- ... ---FIN---) ---
-  if(msg === "--- STATUS S1 ---"){ statusCtx = 'S1'; logLine(msg); return; }
-  if(msg === "--- STATUS S2 ---"){ statusCtx = 'S2'; logLine(msg); return; }
-  if(msg === "--- FIN ---"){ statusCtx = null; logLine(msg); return; }
-  const fsMatch = msg.match(FS_LINE_RE);
-  if(fsMatch && statusCtx){ setFsampleDisplay(statusCtx, parseInt(fsMatch[1],10)); }
+  if(msg === "--- STATUS S1 ---"){ statusCtx = 'S1'; statusBuf = {}; logLine(msg); return; }
+  if(msg === "--- STATUS S2 ---"){ statusCtx = 'S2'; statusBuf = {}; logLine(msg); return; }
+  if(msg === "--- FIN ---"){
+    if(statusCtx) applyStatusToUI(statusCtx, statusBuf);
+    statusCtx = null; statusBuf = {};
+    logLine(msg);
+    return;
+  }
+  if(statusCtx){
+    const fsMatch = msg.match(FS_LINE_RE);
+    if(fsMatch){
+      statusBuf.FSAMPLE = parseInt(fsMatch[1], 16);
+      setFsampleDisplay(statusCtx, parseInt(fsMatch[2], 10));
+      logLine(msg);
+      return;
+    }
+    const vbMatch = msg.match(VB_LINE_RE);
+    if(vbMatch){ statusBuf.VBIAS = (vbMatch[1] === '1'); logLine(msg); return; }
+    const hexMatch = msg.match(HEX_LINE_RE);
+    if(hexMatch){ statusBuf[hexMatch[1]] = parseInt(hexMatch[2], 16); logLine(msg); return; }
+  }
   logLine(msg);
+}
+// ============================================================
+// SINCRONIZAR UI CON LA CONFIG REAL DEL ESP32 (respuesta a STATUS)
+// El ESP32 puede arrancar con una config distinta a la de fábrica
+// (cargada desde flash — ver Modo Dev / persistencia). Sin esto, la
+// UI siempre mostraba los valores por defecto del HTML al recargar
+// la página, aunque el sensor ya estuviera configurado de otra forma.
+// ============================================================
+function applyStatusToUI(sensorKey, buf){
+  const suf = '_' + sensorKey; // 'S1' -> '_S1', igual que el resto de la app
+
+  if(buf.LED1 !== undefined){
+    const on = buf.LED_DIS !== undefined ? !(buf.LED_DIS & (1 << 8)) : undefined;
+    updateLedUi(suf, 'ir', on, getActualCurrentMa(buf.LED1));
+  }
+  if(buf.LED2 !== undefined){
+    const on = buf.LED_DIS !== undefined ? !(buf.LED_DIS & (1 << 9)) : undefined;
+    updateLedUi(suf, 'red', on, getActualCurrentMa(buf.LED2));
+  }
+
+  if(buf.TIA_A !== undefined){
+    const d = decodeTiaReg(buf.TIA_A);
+    setSelectValue('rf_a_'+suf, d.rfKey); setSelectValue('rint_a_'+suf, d.rintKey);
+  }
+  if(buf.TIA_B !== undefined){
+    const d = decodeTiaReg(buf.TIA_B);
+    setSelectValue('rf_b_'+suf, d.rfKey); setSelectValue('rint_b_'+suf, d.rintKey);
+  }
+  if(buf.PULSES_A !== undefined) setInputValue('pulse_a_'+suf, (buf.PULSES_A >> 8) & 0xFF);
+  if(buf.PULSES_B !== undefined) setInputValue('pulse_b_'+suf, (buf.PULSES_B >> 8) & 0xFF);
+
+  if(buf.FSAMPLE !== undefined){
+    const fsKey = reverseLookup(FSAMPLE_PRESETS, buf.FSAMPLE);
+    if(fsKey) setSelectValue('fsample_'+suf, fsKey);
+  }
+  if(buf.NUM_AVG !== undefined){
+    const avgKey = reverseLookup(AVG_PRESETS, buf.NUM_AVG);
+    if(avgKey) setSelectValue('avg_'+suf, avgKey);
+  }
+  if(buf.VBIAS !== undefined){
+    const el = document.getElementById('vbias_'+suf);
+    if(el) el.checked = buf.VBIAS;
+  }
+
+  updateTasaSalida(suf);
+}
+// Actualiza tanto el panel simple (slider + ON/OFF) como el campo de
+// mA del panel avanzado (Modo Dev) para un LED de un sensor dado.
+function updateLedUi(suf, led, on, ma){
+  const key = suf + '_' + led;
+  const prevOn = simpleLedState[key] ? simpleLedState[key].on : false;
+  const maRounded = Math.round(ma * 10) / 10;
+  simpleLedState[key] = { on: (on !== undefined ? on : prevOn), ma: maRounded };
+
+  const ledName = led === 'ir' ? 'IR' : 'Rojo';
+  const range  = document.getElementById('simple_'+led+'_range'+suf);
+  const val    = document.getElementById('simple_'+led+'_val'+suf);
+  const toggle = document.getElementById('simple_'+led+'_toggle'+suf);
+  const sliderVal = Math.min(100, Math.max(0, Math.round(maRounded)));
+  if(range) range.value = sliderVal;
+  if(val)   val.textContent = sliderVal + ' mA';
+  if(toggle && on !== undefined){
+    toggle.textContent = (on ? 'Apagar ' : 'Encender ') + ledName;
+    toggle.classList.toggle('secondary', !on);
+  }
+
+  const devInput = document.getElementById((led === 'ir' ? 'ir_ma_' : 'red_ma_')+suf);
+  if(devInput) devInput.value = maRounded;
 }
 function logLine(s){
   const el = document.getElementById('log');
