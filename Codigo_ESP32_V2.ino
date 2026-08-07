@@ -293,6 +293,58 @@ uint16_t readReg(TwoWire &bus, uint8_t reg) {
 }
 
 // =========================================================
+// PERSISTENCIA DE CONFIGURACIÓN EN FLASH (LittleFS)
+// Guarda S1/S2 cada vez que se aplica un cambio de config (LED,
+// TIA, pulsos, fSAMPLE, avg, VBias) para que el ESP32 arranque con
+// la última configuración usada — pedido por el Modo Desarrollador
+// de la app web — en vez de siempre volver a los valores de fábrica.
+// =========================================================
+const char*   CONFIG_FILE  = "/sensor_cfg.bin";
+const uint8_t CONFIG_MAGIC[4] = { 'N', 'I', 'R', '1' };
+
+void writeSensorStateBin(File &f, SensorState &s) {
+  uint16_t buf[9] = { s.led1, s.led2, s.tia_a, s.tia_b, s.pulses_a,
+                       s.pulses_b, s.led_dis, s.fsample, s.avg };
+  f.write((uint8_t*)buf, sizeof(buf));
+  uint8_t flags = (s.chop ? 1 : 0) | (s.vbias ? 2 : 0);
+  f.write(&flags, 1);
+}
+
+void readSensorStateBin(File &f, SensorState &s) {
+  uint16_t buf[9];
+  f.read((uint8_t*)buf, sizeof(buf));
+  s.led1=buf[0]; s.led2=buf[1]; s.tia_a=buf[2]; s.tia_b=buf[3];
+  s.pulses_a=buf[4]; s.pulses_b=buf[5]; s.led_dis=buf[6];
+  s.fsample=buf[7]; s.avg=buf[8];
+  uint8_t flags = 0;
+  f.read(&flags, 1);
+  s.chop  = flags & 1;
+  s.vbias = flags & 2;
+}
+
+void saveSensorConfig() {
+  File f = LittleFS.open(CONFIG_FILE, "w");
+  if (!f) return;
+  f.write(CONFIG_MAGIC, 4);
+  writeSensorStateBin(f, S1);
+  writeSensorStateBin(f, S2);
+  f.close();
+}
+
+bool loadSensorConfig() {
+  File f = LittleFS.open(CONFIG_FILE, "r");
+  if (!f) return false;
+  uint8_t magic[4];
+  bool ok = (f.read(magic, 4) == 4);
+  for (int i = 0; ok && i < 4; i++) if (magic[i] != CONFIG_MAGIC[i]) ok = false;
+  if (!ok) { f.close(); return false; }
+  readSensorStateBin(f, S1);
+  readSensorStateBin(f, S2);
+  f.close();
+  return true;
+}
+
+// =========================================================
 // INICIALIZACIÓN SENSOR
 // =========================================================
 bool initSensor(TwoWire &bus, SensorState &s, const char* name) {
@@ -331,6 +383,7 @@ void applyLED(TwoWire &bus, SensorState &s, bool isIR, uint16_t val) {
     else          { s.led_dis &= ~(1 << 9); s.led2 = val; writeReg(bus, REG_ILED2_COARSE, val); }
   }
   writeReg(bus, REG_LED_DISABLE, s.led_dis);
+  saveSensorConfig();
 }
 
 void applyTIA(TwoWire &bus, SensorState &s, bool slotA, bool slotB, uint16_t val) {
@@ -338,6 +391,7 @@ void applyTIA(TwoWire &bus, SensorState &s, bool slotA, bool slotB, uint16_t val
   if (slotA) { s.tia_a = val; writeReg(bus, REG_SLOTA_TIA, val); }
   if (slotB) { s.tia_b = val; writeReg(bus, REG_SLOTB_TIA, val); }
   writeReg(bus, REG_MODE, MODE_NORMAL);
+  saveSensorConfig();
 }
 
 void applyPulses(TwoWire &bus, SensorState &s, bool slotA, bool slotB, uint16_t val) {
@@ -356,6 +410,7 @@ void applyPulses(TwoWire &bus, SensorState &s, bool slotA, bool slotB, uint16_t 
   // señal"). Bug heredado del firmware original v6, nunca se había
   // notado porque nadie había probado este caso específico.
   recalcLoopPeriod();
+  saveSensorConfig();
 }
 
 void applyFsample(TwoWire &bus, SensorState &s, uint16_t val) {
@@ -368,6 +423,7 @@ void applyFsample(TwoWire &bus, SensorState &s, uint16_t val) {
   uint32_t hz = 32000UL / ((uint32_t)val * 4);
   DBG("  FSAMPLE aplicado: 0x"); Serial.print(val, HEX);
   DBG(" = "); Serial.print(hz); DBGLN(" Hz");
+  saveSensorConfig();
 }
 
 void applyAvg(TwoWire &bus, SensorState &s, uint16_t val) {
@@ -376,6 +432,7 @@ void applyAvg(TwoWire &bus, SensorState &s, uint16_t val) {
   writeReg(bus, REG_NUM_AVG, val);
   writeReg(bus, REG_MODE,    MODE_NORMAL);
   recalcLoopPeriod();
+  saveSensorConfig();
 }
 
 void applyChop(TwoWire &bus, SensorState &s, bool en) {
@@ -388,6 +445,7 @@ void applyVbias(TwoWire &bus, SensorState &s, bool en) {
   writeReg(bus, REG_MODE,    MODE_PROGRAM);
   writeReg(bus, REG_PD_BIAS, en ? 0x0A80 : 0x0000);
   writeReg(bus, REG_MODE,    MODE_NORMAL);
+  saveSensorConfig();
 }
 
 void printStatus(TwoWire &bus, SensorState &s, const char* name) {
@@ -802,6 +860,16 @@ void setup() {
                    (unsigned)LittleFS.usedBytes(), (unsigned)LittleFS.totalBytes());
   }
 
+  // ── Configuración guardada — S1/S2 empiezan con sus valores de
+  // fábrica (arriba); si hay una config guardada por el Modo
+  // Desarrollador, la sobreescribe ANTES de initSensor() para que
+  // el ESP32 arranque con la última configuración usada.
+  if (loadSensorConfig()) {
+    Serial.println("Config cargada desde flash (ultima configuracion guardada).");
+  } else {
+    Serial.println("Sin config guardada en flash — usando valores de fabrica.");
+  }
+
   // ── BLE ────────────────────────────────────────────────
   setupBLE();
 
@@ -813,6 +881,19 @@ void setup() {
   bool ok1 = initSensor(Wire,  S1, "Sensor1");
   bool ok2 = initSensor(Wire1, S2, "Sensor2");
   if (!ok1 && !ok2) { Serial.println("ERROR FATAL: Ningun sensor."); while(1); }
+
+  // initSensor() no toca REG_PD_BIAS — si VBias estaba guardado activo,
+  // restaurarlo aquí con la misma escritura que usa applyVbias().
+  if (ok1 && S1.vbias) {
+    writeReg(Wire, REG_MODE, MODE_PROGRAM);
+    writeReg(Wire, REG_PD_BIAS, 0x0A80);
+    writeReg(Wire, REG_MODE, MODE_NORMAL);
+  }
+  if (ok2 && S2.vbias) {
+    writeReg(Wire1, REG_MODE, MODE_PROGRAM);
+    writeReg(Wire1, REG_PD_BIAS, 0x0A80);
+    writeReg(Wire1, REG_MODE, MODE_NORMAL);
+  }
 
   recalcLoopPeriod();
   Serial.print("ADPD1080 Dual v12 (Bluetooth BLE, sin WiFi/nube) listo. Loop period=");

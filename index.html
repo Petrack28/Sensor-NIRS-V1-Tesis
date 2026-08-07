@@ -81,6 +81,16 @@
              color:var(--muted);margin-bottom:4px;}
   fieldset{border:1px solid var(--border);border-radius:10px;margin:0 0 10px;padding:8px 10px;}
   legend{font-size:12px;color:var(--muted);padding:0 4px;}
+  input[type=range]{-webkit-appearance:none;appearance:none;height:6px;border-radius:3px;
+        background:var(--panel2);flex:1;min-width:0;}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;
+        border-radius:50%;background:var(--accent);cursor:pointer;border:none;}
+  input[type=range]::-moz-range-thumb{width:20px;height:20px;border-radius:50%;
+        background:var(--accent);cursor:pointer;border:none;}
+  .devtab{display:none;} .devtab.active{display:block;}
+  .devnav{display:flex;gap:8px;margin-bottom:12px;}
+  .devnav button{flex:1;}
+  .statusline.err{color:var(--red);}
 </style>
 </head>
 <body>
@@ -98,6 +108,7 @@
   <button data-tab="s1">Sensor 1</button>
   <button data-tab="s2">Sensor 2</button>
   <button data-tab="archivos">Archivos</button>
+  <button data-tab="dev">Modo Dev</button>
 </nav>
 
 <main>
@@ -191,6 +202,30 @@
         <button class="btn secondary" id="btnRefreshFiles">↻ Actualizar lista</button>
       </div>
       <ul class="filelist" id="fileList"><li class="muted">Sin archivos aún.</li></ul>
+    </div>
+  </section>
+
+  <!-- ======================= TAB MODO DESARROLLADOR ======================= -->
+  <section class="tab" id="tab-dev">
+    <div class="card" id="devLoginCard">
+      <h2>Acceso Modo Desarrollador</h2>
+      <div class="muted" style="margin-bottom:10px;">
+        Configuración avanzada del sensor (TIA, pulsos, fSAMPLE, promediado,
+        VBias, comando manual). Solo para desarrollo y calibración.
+      </div>
+      <div class="row"><label>Usuario</label><input type="text" id="devUser" autocomplete="off"></div>
+      <div class="row"><label>Contraseña</label><input type="password" id="devPass" autocomplete="off"></div>
+      <button class="btn wide" id="devLoginBtn">Entrar</button>
+      <div class="statusline err" id="devLoginError" style="display:none;">Usuario o contraseña incorrectos.</div>
+    </div>
+    <div id="devContent" style="display:none;">
+      <div class="devnav">
+        <button class="btn secondary active" data-devtab="s1">Sensor 1</button>
+        <button class="btn secondary" data-devtab="s2">Sensor 2</button>
+      </div>
+      <div class="devtab active" id="devtab-s1"></div>
+      <div class="devtab" id="devtab-s2"></div>
+      <button class="btn secondary wide" id="devLogoutBtn">Cerrar modo desarrollador</button>
     </div>
   </section>
 
@@ -774,7 +809,100 @@ function onFileEnd(name){
 }
 
 // ============================================================
-// PANEL DE SENSOR (S1 / S2) — generado dinámicamente
+// PANEL SIMPLE DE SENSOR (S1 / S2) — vista amigable para el
+// usuario final: solo intensidad LED (slider 0-100 mA) y ON/OFF
+// por LED. La configuración avanzada (TIA, pulsos, fSAMPLE, avg,
+// VBias, comando manual) vive en Modo Desarrollador, protegida
+// por contraseña — ver buildSensorTab() más abajo.
+// ============================================================
+const simpleLedState = {}; // "S1_ir" -> {on:bool, ma:number}
+function buildSimpleSensorTab(suffix, label){
+  const wrap = document.createElement('div');
+  wrap.innerHTML = `
+    <div class="card">
+      <h2>${label} — LED IR</h2>
+      <div class="row">
+        <input type="range" min="0" max="100" value="50" id="simple_ir_range${suffix}">
+        <span class="pill blue" id="simple_ir_val${suffix}" style="min-width:64px;text-align:center;">50 mA</span>
+      </div>
+      <button class="btn secondary wide" id="simple_ir_toggle${suffix}">Encender IR</button>
+    </div>
+    <div class="card">
+      <h2>${label} — LED Rojo</h2>
+      <div class="row">
+        <input type="range" min="0" max="100" value="50" id="simple_red_range${suffix}">
+        <span class="pill red" id="simple_red_val${suffix}" style="min-width:64px;text-align:center;">50 mA</span>
+      </div>
+      <button class="btn secondary wide" id="simple_red_toggle${suffix}">Encender Rojo</button>
+    </div>
+  `;
+  ['ir','red'].forEach(led=>{
+    const key    = suffix + '_' + led;
+    simpleLedState[key] = { on:false, ma:50 };
+    const range  = wrap.querySelector('#simple_'+led+'_range'+suffix);
+    const val    = wrap.querySelector('#simple_'+led+'_val'+suffix);
+    const toggle = wrap.querySelector('#simple_'+led+'_toggle'+suffix);
+    const ledName = led === 'ir' ? 'IR' : 'Rojo';
+    range.addEventListener('input', ()=>{ val.textContent = range.value + ' mA'; });
+    range.addEventListener('change', ()=>{
+      simpleLedState[key].ma = parseInt(range.value, 10);
+      if(simpleLedState[key].on) sendSimpleLed(suffix, led);
+    });
+    toggle.addEventListener('click', ()=>{
+      const on = !simpleLedState[key].on;
+      simpleLedState[key].on = on;
+      toggle.textContent = (on ? 'Apagar ' : 'Encender ') + ledName;
+      toggle.classList.toggle('secondary', !on);
+      sendSimpleLed(suffix, led);
+    });
+  });
+  return wrap;
+}
+function sendSimpleLed(suffix, led){
+  const key = suffix + '_' + led;
+  const st  = simpleLedState[key];
+  const ma  = st.on ? st.ma : 0;
+  const reg = convertMaToReg(ma);
+  send((led === 'ir' ? 'IR' : 'Rojo') + suffix + '=0x' + reg.toString(16));
+}
+
+// ============================================================
+// MODO DESARROLLADOR — acceso por usuario/contraseña. Puramente
+// una barrera de UI (no hay backend), pensada para que un usuario
+// normal no toque configuración avanzada por accidente.
+// ============================================================
+const DEV_USER = 'sensornirs', DEV_PASS = 'sensornir123';
+document.getElementById('devLoginBtn').addEventListener('click', devTryLogin);
+document.getElementById('devPass').addEventListener('keydown', (e)=>{ if(e.key==='Enter') devTryLogin(); });
+function devTryLogin(){
+  const u = document.getElementById('devUser').value.trim();
+  const p = document.getElementById('devPass').value;
+  if(u === DEV_USER && p === DEV_PASS){
+    document.getElementById('devLoginCard').style.display = 'none';
+    document.getElementById('devContent').style.display = 'block';
+    document.getElementById('devLoginError').style.display = 'none';
+  } else {
+    document.getElementById('devLoginError').style.display = 'block';
+  }
+}
+document.getElementById('devLogoutBtn').addEventListener('click', ()=>{
+  document.getElementById('devUser').value = '';
+  document.getElementById('devPass').value = '';
+  document.getElementById('devContent').style.display = 'none';
+  document.getElementById('devLoginCard').style.display = 'block';
+});
+document.querySelectorAll('.devnav button').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    document.querySelectorAll('.devnav button').forEach(b=>b.classList.remove('active'));
+    document.querySelectorAll('.devtab').forEach(t=>t.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('devtab-'+btn.dataset.devtab).classList.add('active');
+  });
+});
+
+// ============================================================
+// PANEL AVANZADO DE SENSOR (S1 / S2) — Modo Desarrollador.
+// Generado dinámicamente, montado dentro de #devtab-s1/#devtab-s2.
 // ============================================================
 function buildSensorTab(suffix, label){
   const wrap = document.createElement('div');
@@ -904,8 +1032,10 @@ document.querySelectorAll('nav button').forEach(btn=>{
 });
 
 window.addEventListener('load', ()=>{
-  document.getElementById('tab-s1').appendChild(buildSensorTab('_S1','Sensor 1'));
-  document.getElementById('tab-s2').appendChild(buildSensorTab('_S2','Sensor 2'));
+  document.getElementById('tab-s1').appendChild(buildSimpleSensorTab('_S1','Sensor 1'));
+  document.getElementById('tab-s2').appendChild(buildSimpleSensorTab('_S2','Sensor 2'));
+  document.getElementById('devtab-s1').appendChild(buildSensorTab('_S1','Sensor 1'));
+  document.getElementById('devtab-s2').appendChild(buildSensorTab('_S2','Sensor 2'));
   initCharts();
   animate();
   setConn(false);
