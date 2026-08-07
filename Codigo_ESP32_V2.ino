@@ -653,11 +653,16 @@ void listFiles() {
   bool first = true;
   while (file) {
     if (!file.isDirectory()) {
-      if (!first) out += ";";
       String nm = String(file.name());
       if (nm.startsWith("/")) nm = nm.substring(1);
-      out += nm + "|" + String(file.size());
-      first = false;
+      // El archivo de configuración del sensor no es una grabación del
+      // usuario — se excluye de la lista para no mezclarlo con los
+      // archivos de datos (ver también el bloqueo en DELETE_FILE).
+      if (nm != String(CONFIG_FILE + 1)) {
+        if (!first) out += ";";
+        out += nm + "|" + String(file.size());
+        first = false;
+      }
     }
     file = root.openNextFile();
   }
@@ -757,6 +762,13 @@ void handleCommand(const String &cmdIn) {
     String fn = cmd.substring(12);
     fn.trim();
     if (!fn.startsWith("/")) fn = "/" + fn;
+    // Protege el archivo de configuración del sensor incluso si alguien
+    // lo pide por nombre a mano (comando manual en Modo Dev) — no solo
+    // se oculta de LIST_FILES, además el borrado se rechaza aquí.
+    if (fn == CONFIG_FILE) {
+      sendReply("ERR: no se puede borrar el archivo de configuracion del sistema");
+      return;
+    }
     bool ok = LittleFS.remove(fn);
     sendReply(ok ? ("ACK: DELETE_FILE:" + fn) : ("ERR: no se pudo borrar " + fn));
     return;
