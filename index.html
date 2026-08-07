@@ -297,14 +297,26 @@ function setConn(ok){
   document.getElementById('connText').textContent = ok ? "Conectado (Bluetooth)" : "Desconectado";
   document.getElementById('btnBleConnect').textContent = ok ? "🔗 Conectado" : "🔗 Conectar";
 }
-async function send(cmd){
+// Cola de envío BLE — evita que dos writeValue() se disparen a la vez.
+// Varias funciones (applyAfeSlot, applyFsAvg, etc.) llaman a send() más
+// de una vez seguida sin esperar cada una; sin esta cola, Web Bluetooth
+// puede lanzar "GATT operation already in progress" en el segundo
+// writeValue() y ese comando se pierde en silencio (p.ej. PULSES_ tras
+// TIA_, o AVG_ tras FSAMPLE_). Reemplaza a la cola con hilo dedicado
+// que tenía la GUI Python original (_serial_write_loop / cmd_queue).
+let sendQueue = Promise.resolve();
+function send(cmd){
   logLine("> " + cmd);
-  if(!bleConnected || !bleRxChar) return;
-  try{
-    await bleRxChar.writeValue(new TextEncoder().encode(cmd + "\n"));
-  }catch(e){
-    console.error('Error enviando por BLE:', e);
-  }
+  sendQueue = sendQueue.then(async () => {
+    if(!bleConnected || !bleRxChar) return;
+    try{
+      await bleRxChar.writeValue(new TextEncoder().encode(cmd + "\n"));
+    }catch(e){
+      console.error('Error enviando por BLE:', e);
+    }
+    await new Promise(r => setTimeout(r, 15)); // pequeño respiro, igual que el firmware entre paquetes
+  });
+  return sendQueue;
 }
 document.getElementById('btnBleConnect').addEventListener('click', bleConnectFlow);
 
