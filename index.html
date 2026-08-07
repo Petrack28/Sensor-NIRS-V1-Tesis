@@ -580,12 +580,25 @@ function setPill(id, text, cls){
   el.className = 'pill' + (cls ? ' '+cls : '');
 }
 let lastQualityUpdate = 0;
+// Recorta un arreglo de valores a los últimos `seconds` segundos usando
+// su arreglo paralelo de timestamps (relativo, igual que channels[k].t).
+function lastSecondsSlice(tArr, vArr, seconds){
+  if(!tArr.length) return [];
+  const tMin = tArr[tArr.length-1] - seconds;
+  let idx0 = 0;
+  for(let i=0;i<tArr.length;i++){ if(tArr[i] >= tMin){ idx0 = i; break; } }
+  return vArr.slice(idx0);
+}
 function updateQuality(){
   const now = performance.now();
   if(now - lastQualityUpdate < 500) return; // recalcular cada ~0.5s, no en cada muestra
   lastQualityUpdate = now;
   CHAN_KEYS.forEach(k=>{
-    const cv = calcCV(channels[k].v);
+    const ch = channels[k];
+    // CV sobre los últimos 5s (no los 10s completos de la ventana) para
+    // que sea más reactivo a cambios — igual que la GUI Python original.
+    const v5 = lastSecondsSlice(ch.t, ch.v, 5.0);
+    const cv = calcCV(v5);
     const [lbl, cls] = cvLabel(cv);
     setPill('cv_'+k, cv===null ? 'CV: --' : `CV: ${cv.toFixed(1)}% ${lbl}`, cls);
   });
