@@ -105,6 +105,20 @@ volatile bool       bleConnected  = false;
 const char*          BLE_DEVICE_NAME = "NIRS_ESP32";
 
 // -------------------------------------------------------
+// Aviso visual de conexión BLE — no hay buzzer en el hardware, así que
+// el LED rojo (LED2/Slot B) de ambos sensores parpadea 5 veces en 1
+// segundo al conectarse. Se maneja como máquina de estados no bloqueante
+// en loop() (con millis()) en vez de delay() dentro del callback de BLE,
+// que corre en el hilo del stack BLE y no debe bloquearse.
+// -------------------------------------------------------
+volatile bool  g_blinkActive        = false;
+uint8_t        g_blinkToggleCount   = 0;
+bool           g_blinkLedOn         = false;
+uint32_t       g_lastBlinkToggleMs  = 0;
+const uint32_t BLINK_TOGGLE_MS      = 100; // 5 Hz → on/off cada 100 ms
+const uint8_t  BLINK_TOTAL_TOGGLES  = 10;  // 10 cambios = 5 parpadeos completos en 1 s
+
+// -------------------------------------------------------
 // Pines I2C
 // -------------------------------------------------------
 const int I2C0_SDA = 21, I2C0_SCL = 22;
@@ -364,6 +378,12 @@ bool initSensor(TwoWire &bus, SensorState &s, const char* name) {
   writeReg(bus, REG_SLOTB_TIA,    s.tia_b);
   writeReg(bus, REG_SLOTA_PULSES, s.pulses_a);
   writeReg(bus, REG_SLOTB_PULSES, s.pulses_b);
+  // Los LEDs arrancan APAGADOS al energizar el sensor, sin importar el
+  // último estado guardado en flash — solo se restaura la corriente
+  // (led1/led2) para que al encenderlos manualmente usen el valor
+  // correcto. Evita que el sensor gaste energía con los LEDs prendidos
+  // sin que nadie los esté usando todavía.
+  s.led_dis |= (1 << 8) | (1 << 9);
   writeReg(bus, REG_LED_DISABLE,  s.led_dis);
   writeReg(bus, REG_SLOT_EN,      ENABLE_BOTH_SLOTS);
   writeReg(bus, REG_MODE,         MODE_NORMAL);
@@ -788,6 +808,13 @@ class NirsServerCallbacks: public BLEServerCallbacks {
   void onConnect(BLEServer* srv) override {
     bleConnected = true;
     Serial.println("BLE: app conectada");
+    // Solo arma la máquina de estados; el parpadeo real ocurre en loop()
+    // vía handleConnectBlink() — nada de I2C ni delay() aquí (este
+    // callback corre en el hilo del stack BLE, no en el loop principal).
+    g_blinkActive       = true;
+    g_blinkToggleCount  = 0;
+    g_blinkLedOn        = false;
+    g_lastBlinkToggleMs = millis();
   }
   void onDisconnect(BLEServer* srv) override {
     bleConnected = false;
@@ -902,6 +929,42 @@ void setup() {
 }
 
 // =========================================================
+// PARPADEO DE AVISO AL CONECTAR BLE (LED rojo, ambos sensores)
+// Máquina de estados no bloqueante basada en millis() — se arma en
+// NirsServerCallbacks::onConnect() y se ejecuta aquí, en el loop
+// principal, para no bloquear el hilo del stack BLE con delay().
+// Al terminar los 5 parpadeos, restaura el LED rojo a su estado real
+// (S1.led_dis / S2.led_dis), que arranca apagado por defecto.
+// =========================================================
+void handleConnectBlink() {
+  if (!g_blinkActive) return;
+  uint32_t now = millis();
+  if (now - g_lastBlinkToggleMs < BLINK_TOGGLE_MS) return;
+  g_lastBlinkToggleMs = now;
+  g_blinkLedOn = !g_blinkLedOn;
+
+  if (g_blinkLedOn) {
+    writeReg(Wire,  REG_ILED2_COARSE, S1.led2 ? S1.led2 : 0x3008);
+    writeReg(Wire1, REG_ILED2_COARSE, S2.led2 ? S2.led2 : 0x3008);
+    writeReg(Wire,  REG_LED_DISABLE, S1.led_dis & ~(1 << 9));
+    writeReg(Wire1, REG_LED_DISABLE, S2.led_dis & ~(1 << 9));
+  } else {
+    writeReg(Wire,  REG_LED_DISABLE, S1.led_dis | (1 << 9));
+    writeReg(Wire1, REG_LED_DISABLE, S2.led_dis | (1 << 9));
+  }
+
+  g_blinkToggleCount++;
+  if (g_blinkToggleCount >= BLINK_TOTAL_TOGGLES) {
+    g_blinkActive = false;
+    // Restaurar el estado real de encendido/apagado del LED rojo
+    // (por defecto apagado desde initSensor(), salvo que el usuario ya
+    // lo hubiera encendido manualmente antes de esta reconexión).
+    writeReg(Wire,  REG_LED_DISABLE, S1.led_dis);
+    writeReg(Wire1, REG_LED_DISABLE, S2.led_dis);
+  }
+}
+
+// =========================================================
 // LOOP
 // =========================================================
 void loop() {
@@ -914,6 +977,8 @@ void loop() {
     handleCommand(cmd);
   }
   // (Los comandos por BLE llegan de forma asíncrona vía NirsRxCallbacks::onWrite)
+
+  handleConnectBlink();
 
   if (bleConnected || g_recording) {
     uint16_t ir1  = readReg(Wire,  REG_SLOTA_CH1);
