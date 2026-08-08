@@ -406,11 +406,6 @@ function onDataMessage(msg){
 // controles reflejan la config REAL guardada en el ESP32 en vez de
 // quedarse en los valores por defecto del HTML, aunque el sensor haya
 // arrancado con una configuración distinta cargada desde flash.
-let statusCtx = null;
-let statusBuf = {};
-const FS_LINE_RE  = /^FSAMPLE=0x([0-9a-fA-F]+) \((\d+) Hz\)$/;
-const VB_LINE_RE  = /^VBIAS=(\d)$/;
-const HEX_LINE_RE = /^([A-Z_0-9]+)=0x([0-9a-fA-F]+)$/;
 function onStatusMessage(msg){
   if(msg === "ONLINE" || msg === "OFFLINE"){ logLine("ESP32: " + msg); return; }
   if(msg.startsWith("FILES:")) { renderFiles(msg.substring(6)); return; }
@@ -420,27 +415,7 @@ function onStatusMessage(msg){
   if(msg.startsWith("ACK: FILE_START:"))   { onFileStart(msg.substring(16)); return; }
   if(msg.startsWith("ACK: FILE_END:"))     { onFileEnd(msg.substring(14)); return; }
   if(msg.startsWith("ACK: DELETE_FILE:"))  { refreshFiles(); logLine(msg); return; }
-  if(msg === "--- STATUS S1 ---"){ statusCtx = 'S1'; statusBuf = {}; logLine(msg); return; }
-  if(msg === "--- STATUS S2 ---"){ statusCtx = 'S2'; statusBuf = {}; logLine(msg); return; }
-  if(msg === "--- FIN ---"){
-    if(statusCtx) applyStatusToUI(statusCtx, statusBuf);
-    statusCtx = null; statusBuf = {};
-    logLine(msg);
-    return;
-  }
-  if(statusCtx){
-    const fsMatch = msg.match(FS_LINE_RE);
-    if(fsMatch){
-      statusBuf.FSAMPLE = parseInt(fsMatch[1], 16);
-      setFsampleDisplay(statusCtx, parseInt(fsMatch[2], 10));
-      logLine(msg);
-      return;
-    }
-    const vbMatch = msg.match(VB_LINE_RE);
-    if(vbMatch){ statusBuf.VBIAS = (vbMatch[1] === '1'); logLine(msg); return; }
-    const hexMatch = msg.match(HEX_LINE_RE);
-    if(hexMatch){ statusBuf[hexMatch[1]] = parseInt(hexMatch[2], 16); logLine(msg); return; }
-  }
+  parseStatusLine(msg); // no-op si no matchea nada (p.ej. los "--- STATUS ---"/"--- FIN ---")
   logLine(msg);
 }
 // ============================================================
@@ -449,45 +424,79 @@ function onStatusMessage(msg){
 // (cargada desde flash — ver Modo Dev / persistencia). Sin esto, la
 // UI siempre mostraba los valores por defecto del HTML al recargar
 // la página, aunque el sensor ya estuviera configurado de otra forma.
+//
+// Cada línea de STATUS se identifica a sí misma con el sufijo del
+// sensor (FSAMPLE_S1=, TIA_A_S2=, etc. — igual que los comandos SET)
+// y se aplica de forma independiente apenas llega. A diferencia de un
+// diseño con delimitadores de bloque (--- STATUS ---/--- FIN ---) que
+// hay que reconstruir acumulando líneas, aquí no hace falta: si una
+// notificación BLE se pierde en el camino, solo falta ESE campo
+// puntual, no toda la configuración de un sensor completo.
 // ============================================================
-function applyStatusToUI(sensorKey, buf){
-  const suf = '_' + sensorKey; // 'S1' -> '_S1', igual que el resto de la app
-
-  if(buf.LED1 !== undefined){
-    const on = buf.LED_DIS !== undefined ? !(buf.LED_DIS & (1 << 8)) : undefined;
-    updateLedUi(suf, 'ir', on, getActualCurrentMa(buf.LED1));
+const lastLedReg = {}; // "S1_ir" / "S1_red" -> valor crudo del registro de corriente
+const lastLedDis = {}; // "S1" -> valor crudo de LED_DIS
+function applyLedIfReady(sensor, led){
+  const regKey = sensor + '_' + led;
+  if(lastLedReg[regKey] === undefined) return;
+  const dis = lastLedDis[sensor];
+  const bit = led === 'ir' ? 8 : 9;
+  const on = dis !== undefined ? !((dis >> bit) & 1) : undefined;
+  updateLedUi('_'+sensor, led, on, getActualCurrentMa(lastLedReg[regKey]));
+  updateLedInfoLabel('_'+sensor);
+}
+const STATUS_LINE_PATTERNS = [
+  { re: /^FSAMPLE_(S[12])=0x([0-9a-fA-F]+) \((\d+) Hz\)$/, fn: (m)=>{
+      const suf = '_'+m[1];
+      const fsKey = reverseLookup(FSAMPLE_PRESETS, parseInt(m[2],16));
+      if(fsKey) setSelectValue('fsample_'+suf, fsKey);
+      setFsampleDisplay(m[1], parseInt(m[3],10));
+      updateTasaSalida(suf);
+  }},
+  { re: /^NUM_AVG_(S[12])=0x([0-9a-fA-F]+)$/, fn: (m)=>{
+      const suf = '_'+m[1];
+      const avgKey = reverseLookup(AVG_PRESETS, parseInt(m[2],16));
+      if(avgKey) setSelectValue('avg_'+suf, avgKey);
+      updateTasaSalida(suf);
+  }},
+  { re: /^TIA_A_(S[12])=0x([0-9a-fA-F]+)$/, fn: (m)=>{
+      const d = decodeTiaReg(parseInt(m[2],16));
+      setSelectValue('rf_a__'+m[1], d.rfKey); setSelectValue('rint_a__'+m[1], d.rintKey);
+  }},
+  { re: /^TIA_B_(S[12])=0x([0-9a-fA-F]+)$/, fn: (m)=>{
+      const d = decodeTiaReg(parseInt(m[2],16));
+      setSelectValue('rf_b__'+m[1], d.rfKey); setSelectValue('rint_b__'+m[1], d.rintKey);
+  }},
+  { re: /^PULSES_A_(S[12])=0x([0-9a-fA-F]+)$/, fn: (m)=>{
+      setInputValue('pulse_a__'+m[1], (parseInt(m[2],16)>>8)&0xFF);
+      updateTasaSalida('_'+m[1]);
+  }},
+  { re: /^PULSES_B_(S[12])=0x([0-9a-fA-F]+)$/, fn: (m)=>{
+      setInputValue('pulse_b__'+m[1], (parseInt(m[2],16)>>8)&0xFF);
+      updateTasaSalida('_'+m[1]);
+  }},
+  { re: /^LED1_(S[12])=0x([0-9a-fA-F]+)$/, fn: (m)=>{
+      lastLedReg[m[1]+'_ir'] = parseInt(m[2],16);
+      applyLedIfReady(m[1], 'ir');
+  }},
+  { re: /^LED2_(S[12])=0x([0-9a-fA-F]+)$/, fn: (m)=>{
+      lastLedReg[m[1]+'_red'] = parseInt(m[2],16);
+      applyLedIfReady(m[1], 'red');
+  }},
+  { re: /^LED_DIS_(S[12])=0x([0-9a-fA-F]+)$/, fn: (m)=>{
+      lastLedDis[m[1]] = parseInt(m[2],16);
+      applyLedIfReady(m[1], 'ir'); applyLedIfReady(m[1], 'red');
+  }},
+  { re: /^VBIAS_(S[12])=(\d)$/, fn: (m)=>{
+      const el = document.getElementById('vbias__'+m[1]);
+      if(el) el.checked = (m[2] === '1');
+  }},
+];
+function parseStatusLine(msg){
+  for(const p of STATUS_LINE_PATTERNS){
+    const m = msg.match(p.re);
+    if(m){ p.fn(m); return true; }
   }
-  if(buf.LED2 !== undefined){
-    const on = buf.LED_DIS !== undefined ? !(buf.LED_DIS & (1 << 9)) : undefined;
-    updateLedUi(suf, 'red', on, getActualCurrentMa(buf.LED2));
-  }
-  if(buf.LED1 !== undefined || buf.LED2 !== undefined) updateLedInfoLabel(suf);
-
-  if(buf.TIA_A !== undefined){
-    const d = decodeTiaReg(buf.TIA_A);
-    setSelectValue('rf_a_'+suf, d.rfKey); setSelectValue('rint_a_'+suf, d.rintKey);
-  }
-  if(buf.TIA_B !== undefined){
-    const d = decodeTiaReg(buf.TIA_B);
-    setSelectValue('rf_b_'+suf, d.rfKey); setSelectValue('rint_b_'+suf, d.rintKey);
-  }
-  if(buf.PULSES_A !== undefined) setInputValue('pulse_a_'+suf, (buf.PULSES_A >> 8) & 0xFF);
-  if(buf.PULSES_B !== undefined) setInputValue('pulse_b_'+suf, (buf.PULSES_B >> 8) & 0xFF);
-
-  if(buf.FSAMPLE !== undefined){
-    const fsKey = reverseLookup(FSAMPLE_PRESETS, buf.FSAMPLE);
-    if(fsKey) setSelectValue('fsample_'+suf, fsKey);
-  }
-  if(buf.NUM_AVG !== undefined){
-    const avgKey = reverseLookup(AVG_PRESETS, buf.NUM_AVG);
-    if(avgKey) setSelectValue('avg_'+suf, avgKey);
-  }
-  if(buf.VBIAS !== undefined){
-    const el = document.getElementById('vbias_'+suf);
-    if(el) el.checked = buf.VBIAS;
-  }
-
-  updateTasaSalida(suf);
+  return false;
 }
 // Actualiza tanto el panel simple (slider + ON/OFF) como el campo de
 // mA del panel avanzado (Modo Dev) para un LED de un sensor dado.

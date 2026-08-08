@@ -480,25 +480,32 @@ void printStatus(TwoWire &bus, SensorState &s, const char* name) {
   Serial.print("Loop period="); Serial.print(g_loop_period_us); Serial.println(" us");
   Serial.println("--- FIN ---");
 
-  btPrint("--- STATUS "); btPrintln(name);
-  btPrint("MODE=0x");     btPrintlnHex(readReg(bus, REG_MODE));
-  btPrint("FSAMPLE=0x");  btPrintHex(readReg(bus, REG_FSAMPLE));
-  btPrint(" ("); btPrint(hz); btPrintln(" Hz)");
-  btPrint("NUM_AVG=0x");  btPrintlnHex(readReg(bus, REG_NUM_AVG));
-  btPrint("TIA_A=0x");    btPrintlnHex(readReg(bus, REG_SLOTA_TIA));
-  btPrint("TIA_B=0x");    btPrintlnHex(readReg(bus, REG_SLOTB_TIA));
-  btPrint("PULSES_A=0x"); btPrintlnHex(readReg(bus, REG_SLOTA_PULSES));
-  btPrint("PULSES_B=0x"); btPrintlnHex(readReg(bus, REG_SLOTB_PULSES));
-  btPrint("LED1=0x");     btPrintlnHex(readReg(bus, REG_ILED1_COARSE));
-  btPrint("LED2=0x");     btPrintlnHex(readReg(bus, REG_ILED2_COARSE));
-  // LED_DIS y VBIAS no son registros derivables de una sola lectura I2C de
-  // forma limpia (LED_DIS sí, pero VBias se maneja como estado en RAM) —
-  // se reportan desde el SensorState en memoria para que la app web pueda
-  // reconstruir el estado ON/OFF real de los LEDs y de VBias al conectar.
-  btPrint("LED_DIS=0x");  btPrintlnHex(s.led_dis);
-  btPrint("VBIAS=");      btPrintln(s.vbias ? 1 : 0);
-  btPrint("Loop period="); btPrint(g_loop_period_us); btPrintln(" us");
-  btPrintln("--- FIN ---");
+  // BLE: cada línea lleva el sufijo del sensor en el propio nombre del
+  // campo (igual que los comandos SET: TIA_A_S1=, FSAMPLE_S1=, etc.) y
+  // se manda como una línea independiente vía sendReply(). A diferencia
+  // del formato anterior (bloque delimitado por --- STATUS --- /
+  // --- FIN --- que la app reconstruía acumulando líneas), aquí cada
+  // línea se basta a sí misma: si una notificación BLE se pierde en el
+  // camino, la app solo deja de actualizar ESE campo puntual, no toda
+  // la configuración del sensor completo. Los delimitadores se dejan
+  // solo como referencia visual en la consola, ya no los usa el parser.
+  sendReply(String("--- STATUS ") + name + " ---");
+  sendReply(String("FSAMPLE_") + name + "=0x" + String(readReg(bus, REG_FSAMPLE), HEX) +
+            " (" + String(hz) + " Hz)");
+  sendReply(String("NUM_AVG_") + name + "=0x" + String(readReg(bus, REG_NUM_AVG), HEX));
+  sendReply(String("TIA_A_") + name + "=0x" + String(readReg(bus, REG_SLOTA_TIA), HEX));
+  sendReply(String("TIA_B_") + name + "=0x" + String(readReg(bus, REG_SLOTB_TIA), HEX));
+  sendReply(String("PULSES_A_") + name + "=0x" + String(readReg(bus, REG_SLOTA_PULSES), HEX));
+  sendReply(String("PULSES_B_") + name + "=0x" + String(readReg(bus, REG_SLOTB_PULSES), HEX));
+  sendReply(String("LED1_") + name + "=0x" + String(readReg(bus, REG_ILED1_COARSE), HEX));
+  sendReply(String("LED2_") + name + "=0x" + String(readReg(bus, REG_ILED2_COARSE), HEX));
+  // LED_DIS y VBIAS se reportan desde el SensorState en memoria (VBias no
+  // es un registro de lectura directa de estado on/off) para que la app
+  // web reconstruya el ON/OFF real de los LEDs y de VBias al conectar.
+  sendReply(String("LED_DIS_") + name + "=0x" + String(s.led_dis, HEX));
+  sendReply(String("VBIAS_") + name + "=" + String(s.vbias ? 1 : 0));
+  sendReply(String("Loop period=") + String(g_loop_period_us) + " us");
+  sendReply("--- FIN ---");
 }
 
 // =========================================================
