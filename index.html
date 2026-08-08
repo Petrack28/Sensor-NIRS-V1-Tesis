@@ -1067,14 +1067,18 @@ function decimateSeries(t, v, maxPoints){
   return {t:dt, v:dvArr};
 }
 function autoVisualizeRecording(name){
-  const files = { S1: name+'_S1_datos.bin', S2: name+'_S2_datos.bin' };
+  // El firmware solo soporta UNA descarga activa a la vez (g_dlActive) —
+  // si se piden ambos archivos en paralelo, la segunda petición llega
+  // mientras la primera sigue en curso y el ESP32 la rechaza en
+  // silencio ("ya hay una descarga en curso"), dejando la gráfica
+  // esperando datos que nunca llegan. Por eso van encadenadas: S2 se
+  // pide solo después de que S1 termine por completo.
   const results = {};
-  let pending = 2;
-  ['S1','S2'].forEach(sensor=>{
-    downloadFile(files[sensor], (bytes)=>{
-      results[sensor] = decodeRecordingBin(bytes);
-      pending--;
-      if(pending === 0) renderRecordingChart(name, results);
+  downloadFile(name+'_S1_datos.bin', (bytesS1)=>{
+    results.S1 = decodeRecordingBin(bytesS1);
+    downloadFile(name+'_S2_datos.bin', (bytesS2)=>{
+      results.S2 = decodeRecordingBin(bytesS2);
+      renderRecordingChart(name, results);
     });
   });
 }
