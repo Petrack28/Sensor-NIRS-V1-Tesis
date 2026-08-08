@@ -733,9 +733,31 @@ void reportSpace() {
 // =========================================================
 const size_t FILE_CHUNK_RAW = 768; // múltiplo de 3 → base64 exacto, sin relleno
 
+// -------------------------------------------------------
+// Estado de descarga — NO BLOQUEANTE. sendFileOverBle() solo arma la
+// transferencia; handleFileDownloadStep() manda UN pedazo por
+// iteración de loop() (igual patrón que el parpadeo de conexión BLE).
+// Antes, todo el archivo se mandaba en un for() síncrono dentro de
+// handleCommand() — para una grabación temporizada larga eso podía
+// tardar minutos bloqueando el hilo del stack BLE por completo, sin
+// poder atender NINGÚN otro comando mientras tanto (ni siquiera
+// DELETE_FILE) — el bug reportado de "se congela la app al descargar".
+// -------------------------------------------------------
+bool     g_dlActive       = false;
+File     g_dlFile;
+String   g_dlNameClean;
+size_t   g_dlTotalChunks  = 0;
+size_t   g_dlIdx          = 0;
+uint32_t g_dlLastChunkMs  = 0;
+const uint32_t DL_CHUNK_INTERVAL_MS = 5; // mismo respiro que antes, ahora entre pasos de loop()
+
 void sendFileOverBle(const String &rawName) {
   if (g_recording) {
     sendReply("ERR: no se puede descargar mientras hay una grabación activa");
+    return;
+  }
+  if (g_dlActive) {
+    sendReply("ERR: ya hay una descarga en curso");
     return;
   }
   String fn = rawName;
@@ -746,35 +768,55 @@ void sendFileOverBle(const String &rawName) {
     sendReply("ERR: archivo no encontrado: " + rawName);
     return;
   }
-  File f = LittleFS.open(fn, "r");
-  if (!f) {
+  g_dlFile = LittleFS.open(fn, "r");
+  if (!g_dlFile) {
     sendReply("ERR: no se pudo abrir: " + rawName);
     return;
   }
 
-  size_t total = f.size();
-  size_t totalChunks = (total + FILE_CHUNK_RAW - 1) / FILE_CHUNK_RAW;
-  if (totalChunks == 0) totalChunks = 1; // archivo vacío, igual mandamos FILE_END
+  size_t total = g_dlFile.size();
+  g_dlTotalChunks = (total + FILE_CHUNK_RAW - 1) / FILE_CHUNK_RAW;
+  if (g_dlTotalChunks == 0) g_dlTotalChunks = 1; // archivo vacío, igual mandamos FILE_END
+  g_dlNameClean = fn.startsWith("/") ? fn.substring(1) : fn;
+  g_dlIdx = 0;
+  g_dlActive = true;
+  g_dlLastChunkMs = millis();
 
-  String nombreLimpio = fn.startsWith("/") ? fn.substring(1) : fn;
-  sendReply("ACK: FILE_START:" + nombreLimpio + ":" + String(total) + ":" + String(totalChunks));
+  sendReply("ACK: FILE_START:" + g_dlNameClean + ":" + String(total) + ":" + String(g_dlTotalChunks));
+}
+
+// Manda un pedazo del archivo activo (si hay uno) y regresa de inmediato
+// — se llama en cada iteración de loop(), nunca bloquea.
+void handleFileDownloadStep() {
+  if (!g_dlActive) return;
+  if (!bleConnected) {                 // se perdió la conexión a medio envío
+    g_dlFile.close();
+    g_dlActive = false;
+    return;
+  }
+  uint32_t now = millis();
+  if (now - g_dlLastChunkMs < DL_CHUNK_INTERVAL_MS) return;
+  g_dlLastChunkMs = now;
 
   uint8_t  rawBuf[FILE_CHUNK_RAW];
   // base64 de 768 bytes = 1024 caracteres exactos + 1 byte para '\0'
   char     b64Buf[1040];
 
-  for (size_t idx = 0; idx < totalChunks; idx++) {
-    size_t n = f.read(rawBuf, FILE_CHUNK_RAW);
-    size_t outLen = 0;
-    mbedtls_base64_encode((unsigned char*)b64Buf, sizeof(b64Buf), &outLen, rawBuf, n);
-    b64Buf[outLen] = '\0';
+  size_t n = g_dlFile.read(rawBuf, FILE_CHUNK_RAW);
+  size_t outLen = 0;
+  mbedtls_base64_encode((unsigned char*)b64Buf, sizeof(b64Buf), &outLen, rawBuf, n);
+  b64Buf[outLen] = '\0';
 
-    String msg = "FILEDATA:" + nombreLimpio + "|" + String(idx) + "|" + String(totalChunks) + "|" + String(b64Buf);
-    bleSendLine(msg);
-    delay(5); // pequeño respiro para no saturar el stack BLE
+  String msg = "FILEDATA:" + g_dlNameClean + "|" + String(g_dlIdx) + "|" +
+               String(g_dlTotalChunks) + "|" + String(b64Buf);
+  bleSendLine(msg);
+
+  g_dlIdx++;
+  if (g_dlIdx >= g_dlTotalChunks) {
+    g_dlFile.close();
+    g_dlActive = false;
+    sendReply("ACK: FILE_END:" + g_dlNameClean);
   }
-  f.close();
-  sendReply("ACK: FILE_END:" + nombreLimpio);
 }
 
 // =========================================================
@@ -1044,6 +1086,7 @@ void loop() {
   // (Los comandos por BLE llegan de forma asíncrona vía NirsRxCallbacks::onWrite)
 
   handleConnectBlink();
+  handleFileDownloadStep();
 
   if (bleConnected || g_recording) {
     // Solo se toca el bus de un sensor si fue detectado al arrancar —

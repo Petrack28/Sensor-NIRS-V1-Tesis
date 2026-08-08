@@ -109,6 +109,7 @@
 
 <nav>
   <button class="active" data-tab="principal">Principal</button>
+  <button data-tab="viz">Visualización</button>
   <button data-tab="s1">Sensor 1</button>
   <button data-tab="s2">Sensor 2</button>
   <button data-tab="archivos">Archivos</button>
@@ -188,6 +189,34 @@
       <div id="log"></div>
     </div>
 
+  </section>
+
+  <!-- ======================= TAB VISUALIZACIÓN ======================= -->
+  <section class="tab" id="tab-viz">
+    <div class="card">
+      <h2>Visualización de grabación</h2>
+      <div class="muted" id="vizTitle">Aún no hay ninguna grabación graficada — haz una adquisición temporizada.</div>
+    </div>
+    <div class="card">
+      <div class="chanBlock">
+        <div class="chanLabel"><span>Sensor 1 — IR</span></div>
+        <canvas id="vizChart_S1_IR" width="600" height="140"></canvas>
+      </div>
+      <div class="chanBlock">
+        <div class="chanLabel"><span>Sensor 1 — Rojo</span></div>
+        <canvas id="vizChart_S1_Rojo" width="600" height="140"></canvas>
+      </div>
+    </div>
+    <div class="card">
+      <div class="chanBlock">
+        <div class="chanLabel"><span>Sensor 2 — IR</span></div>
+        <canvas id="vizChart_S2_IR" width="600" height="140"></canvas>
+      </div>
+      <div class="chanBlock">
+        <div class="chanLabel"><span>Sensor 2 — Rojo</span></div>
+        <canvas id="vizChart_S2_Rojo" width="600" height="140"></canvas>
+      </div>
+    </div>
   </section>
 
   <!-- ======================= TAB SENSOR (plantilla) ======================= -->
@@ -424,7 +453,7 @@ function onStatusMessage(msg){
   if(msg.startsWith("FILES:")) { renderFiles(msg.substring(6)); return; }
   if(msg.startsWith("SPACE:")) { renderSpace(msg.substring(6)); return; }
   if(msg.startsWith("ACK: RECORD_START:")) { onRecordStarted(msg.substring(18)); return; }
-  if(msg.startsWith("ACK: RECORD_STOP:"))  { onRecordStopped(); return; }
+  if(msg.startsWith("ACK: RECORD_STOP:"))  { onRecordStopped(msg.substring(17)); return; }
   if(msg.startsWith("ACK: FILE_START:"))   { onFileStart(msg.substring(16)); return; }
   if(msg.startsWith("ACK: FILE_END:"))     { onFileEnd(msg.substring(14)); return; }
   if(msg.startsWith("ACK: DELETE_FILE:"))  { refreshFiles(); logLine(msg); return; }
@@ -856,14 +885,19 @@ function onRecordStarted(name){
     if(recRemaining<=0){ clearInterval(recTimer); send('RECORD_STOP'); }
   }, 1000);
 }
-function onRecordStopped(){
+function onRecordStopped(name){
   recording = false;
   viewingLive = false;
   clearInterval(recTimer);
   document.getElementById('btnPlay').disabled = false;
   document.getElementById('btnStop').disabled = true;
-  setAcqStatus('Grabación guardada. Ve a la pestaña "Archivos" para descargarla.', 'ok');
   refreshFiles();
+  if(name){
+    setAcqStatus('Grabación guardada. Generando gráfica…', 'ok');
+    autoVisualizeRecording(name);
+  } else {
+    setAcqStatus('Grabación guardada. Ve a la pestaña "Archivos" para descargarla.', 'ok');
+  }
 }
 function setAcqStatus(txt, cls){
   const el = document.getElementById('acqStatus');
@@ -925,12 +959,21 @@ document.getElementById('btnRefreshFiles').addEventListener('click', refreshFile
 // DESCARGA DE ARCHIVOS POR MQTT (chunks base64 → Blob → descarga)
 // ============================================================
 const pendingDownloads = {}; // name -> {totalBytes, totalChunks, chunks:[]}
+const pendingCallbacks = {}; // name -> function(bytes) — descargas "silenciosas" (ver autoVisualizeRecording)
 
-function downloadFile(name){
+// Si se pasa onComplete, la descarga es silenciosa: no muestra la barra
+// de progreso de Archivos ni dispara el guardado a disco — al terminar
+// llama a onComplete(bytes) con el archivo completo ya reensamblado.
+// Sin onComplete, se comporta como antes (botón "Descargar" manual).
+function downloadFile(name, onComplete){
   if(pendingDownloads[name]){ return; } // ya en curso
-  const prog = document.getElementById('progress_'+cssSafe(name));
-  if(prog) prog.style.display = 'block';
-  setProgress(name, 0, 'Solicitando…');
+  if(onComplete){
+    pendingCallbacks[name] = onComplete;
+  } else {
+    const prog = document.getElementById('progress_'+cssSafe(name));
+    if(prog) prog.style.display = 'block';
+    setProgress(name, 0, 'Solicitando…');
+  }
   send('DOWNLOAD_FILE:' + name);
 }
 function setProgress(name, pct, label){
@@ -965,24 +1008,136 @@ function onFileDataMessage(msg){
 function onFileEnd(name){
   const pd = pendingDownloads[name];
   if(!pd){ return; }
-  setProgress(name, 100, 'Ensamblando archivo…');
+  const cb = pendingCallbacks[name];
   try{
     const fullB64 = pd.chunks.join('');
     const binaryStr = atob(fullB64);
     const bytes = new Uint8Array(binaryStr.length);
     for(let i=0;i<binaryStr.length;i++) bytes[i] = binaryStr.charCodeAt(i);
-    const blob = new Blob([bytes], {type:'application/octet-stream'});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = name;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    setProgress(name, 100, 'Descargado ✓');
+
+    if(cb){
+      delete pendingCallbacks[name];
+      cb(bytes);
+    } else {
+      setProgress(name, 100, 'Ensamblando archivo…');
+      const blob = new Blob([bytes], {type:'application/octet-stream'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setProgress(name, 100, 'Descargado ✓');
+    }
   }catch(e){
     console.error('Error ensamblando archivo:', e);
-    setProgress(name, 0, 'Error al ensamblar — intenta de nuevo');
+    if(cb) delete pendingCallbacks[name];
+    else setProgress(name, 0, 'Error al ensamblar — intenta de nuevo');
   }
   delete pendingDownloads[name];
+}
+
+// ============================================================
+// VISUALIZACIÓN AUTOMÁTICA DE GRABACIONES TEMPORIZADAS
+// Al terminar una grabación (RECORD_STOP), descarga en silencio los
+// .bin de ambos sensores (sin disparar el guardado a disco de
+// downloadFile normal) y los grafica decimados en la pestaña
+// "Visualización" — igual formato que documenta el firmware:
+// registros de 8 bytes = uint32 t_ms (LE) + uint16 ch1 (LE) + uint16 ch2 (LE).
+// ============================================================
+function decodeRecordingBin(bytes){
+  const n = Math.floor(bytes.length / 8);
+  const t = new Array(n), ch1 = new Array(n), ch2 = new Array(n);
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for(let i=0;i<n;i++){
+    const off = i*8;
+    t[i]   = dv.getUint32(off, true) / 1000.0;
+    ch1[i] = dv.getUint16(off+4, true);
+    ch2[i] = dv.getUint16(off+6, true);
+  }
+  return {t, ch1, ch2};
+}
+// Reduce a lo más maxPoints puntos (misma idea que la GUI Python
+// original) para que grabaciones largas se dibujen al instante.
+function decimateSeries(t, v, maxPoints){
+  const n = t.length;
+  if(n <= maxPoints) return {t, v};
+  const step = Math.ceil(n / maxPoints);
+  const dt = [], dvArr = [];
+  for(let i=0;i<n;i+=step){ dt.push(t[i]); dvArr.push(v[i]); }
+  return {t:dt, v:dvArr};
+}
+function autoVisualizeRecording(name){
+  const files = { S1: name+'_S1_datos.bin', S2: name+'_S2_datos.bin' };
+  const results = {};
+  let pending = 2;
+  ['S1','S2'].forEach(sensor=>{
+    downloadFile(files[sensor], (bytes)=>{
+      results[sensor] = decodeRecordingBin(bytes);
+      pending--;
+      if(pending === 0) renderRecordingChart(name, results);
+    });
+  });
+}
+function drawStaticChart(canvasId, t, v, color){
+  const c = document.getElementById(canvasId);
+  if(!c) return;
+  const ctx = c.getContext('2d');
+  const ratio = window.devicePixelRatio || 1;
+  c.width = c.clientWidth*ratio; c.height = c.clientHeight*ratio;
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.scale(ratio, ratio);
+  const W = c.clientWidth, H = c.clientHeight;
+  ctx.clearRect(0,0,W,H);
+  if(!t.length) return;
+
+  const ML=46, MB=16, MT=4, MR=6;
+  const plotW = Math.max(10, W-ML-MR), plotH = Math.max(10, H-MT-MB);
+  const tMin = t[0], tMax = t[t.length-1];
+  let mn = Math.min(...v), mx = Math.max(...v);
+  if(mx-mn < 10){ mx += 10; mn -= 10; }
+  const pad = (mx-mn)*0.08; mn -= pad; mx += pad;
+
+  const px = tt => ML + ((tt-tMin)/((tMax-tMin)||1))*plotW;
+  const py = vv => MT + plotH - ((vv-mn)/((mx-mn)||1))*plotH;
+
+  ctx.strokeStyle = "#232833"; ctx.lineWidth = 1;
+  ctx.fillStyle = "#6b7280"; ctx.font = "10px ui-monospace,Consolas,monospace";
+  ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  const NY = 4;
+  for(let i=0;i<=NY;i++){
+    const vv = mn + (mx-mn)*(1 - i/NY);
+    const y = MT + (plotH*i/NY);
+    ctx.beginPath(); ctx.moveTo(ML,y); ctx.lineTo(ML+plotW,y); ctx.stroke();
+    ctx.fillText(Math.round(vv).toString(), ML-4, y);
+  }
+  ctx.textAlign = "center"; ctx.textBaseline = "top";
+  const NX = 5;
+  for(let i=0;i<=NX;i++){
+    const tt = tMin + (tMax-tMin)*i/NX;
+    const x = ML + (plotW*i/NX);
+    ctx.strokeStyle = "#1c2028";
+    ctx.beginPath(); ctx.moveTo(x,MT); ctx.lineTo(x,MT+plotH); ctx.stroke();
+    ctx.fillText(tt.toFixed(1)+'s', x, MT+plotH+2);
+  }
+  ctx.strokeStyle = color; ctx.lineWidth = 1.4; ctx.beginPath();
+  for(let i=0;i<t.length;i++){
+    const x = px(t[i]), y = py(v[i]);
+    if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+}
+function renderRecordingChart(name, results){
+  const title = document.getElementById('vizTitle');
+  if(title) title.textContent = 'Grabación: ' + name;
+  ['S1','S2'].forEach(sensor=>{
+    const rec = results[sensor];
+    if(!rec) return;
+    const ir  = decimateSeries(rec.t, rec.ch1, 900);
+    const red = decimateSeries(rec.t, rec.ch2, 900);
+    drawStaticChart('vizChart_'+sensor+'_IR',   ir.t,  ir.v,  '#4da3ff');
+    drawStaticChart('vizChart_'+sensor+'_Rojo', red.t, red.v, '#ff5c5c');
+  });
+  setAcqStatus('Grabación guardada y graficada en la pestaña "Visualización".', 'ok');
 }
 
 // ============================================================
