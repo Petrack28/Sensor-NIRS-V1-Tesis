@@ -1087,10 +1087,18 @@ function drawStaticChart(canvasId, t, v, color){
   if(!c) return;
   const ctx = c.getContext('2d');
   const ratio = window.devicePixelRatio || 1;
-  c.width = c.clientWidth*ratio; c.height = c.clientHeight*ratio;
+  // Si la pestaña "Visualización" está oculta (display:none) en este
+  // momento — típico, porque la gráfica se genera justo al terminar la
+  // grabación, viendo aún la pestaña Principal — clientWidth/Height dan
+  // 0, y fijar el canvas a 0x0 lo deja invisible para siempre aunque
+  // luego se muestre la pestaña. Se usa el ancho/alto declarado en el
+  // HTML como respaldo cuando el elemento está oculto.
+  const cw = c.clientWidth  || parseInt(c.getAttribute('width'),10)  || 600;
+  const ch = c.clientHeight || parseInt(c.getAttribute('height'),10) || 140;
+  c.width = cw*ratio; c.height = ch*ratio;
   ctx.setTransform(1,0,0,1,0,0);
   ctx.scale(ratio, ratio);
-  const W = c.clientWidth, H = c.clientHeight;
+  const W = cw, H = ch;
   ctx.clearRect(0,0,W,H);
   if(!t.length) return;
 
@@ -1130,7 +1138,9 @@ function drawStaticChart(canvasId, t, v, color){
   }
   ctx.stroke();
 }
+let lastVizName = null, lastVizResults = null;
 function renderRecordingChart(name, results){
+  lastVizName = name; lastVizResults = results;
   const title = document.getElementById('vizTitle');
   if(title) title.textContent = 'Grabación: ' + name;
   ['S1','S2'].forEach(sensor=>{
@@ -1398,6 +1408,11 @@ document.querySelectorAll('nav button').forEach(btn=>{
     document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById('tab-'+btn.dataset.tab).classList.add('active');
+    // Red de seguridad adicional al fix de tamaño en drawStaticChart():
+    // si hay una gráfica pendiente, se vuelve a dibujar apenas la
+    // pestaña se hace visible (por si el canvas quedó con tamaño 0
+    // de una ejecución anterior, o cambió el tamaño de la ventana).
+    if(btn.dataset.tab === 'viz' && lastVizResults) renderRecordingChart(lastVizName, lastVizResults);
   });
 });
 
