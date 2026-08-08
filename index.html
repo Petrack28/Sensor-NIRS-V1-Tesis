@@ -542,6 +542,8 @@ function updateLedUi(suf, led, on, ma){
 
   const devInput = document.getElementById((led === 'ir' ? 'ir_ma_' : 'red_ma_')+suf);
   if(devInput) devInput.value = maRounded;
+
+  updateBothToggleLabel(suf);
 }
 // Label combinado (Modo Dev) con el estado real de AMBOS LEDs de un
 // sensor — antes solo se actualizaba al hacer clic manual en "Aplicar"
@@ -995,6 +997,10 @@ function buildSimpleSensorTab(suffix, label){
   const wrap = document.createElement('div');
   wrap.innerHTML = `
     <div class="card">
+      <h2>${label} — Ambos LEDs</h2>
+      <button class="btn secondary wide" id="simple_both_toggle${suffix}">Encender ambos</button>
+    </div>
+    <div class="card">
       <h2>${label} — LED IR</h2>
       <div class="row">
         <input type="range" min="0" max="100" value="50" id="simple_ir_range${suffix}">
@@ -1029,9 +1035,39 @@ function buildSimpleSensorTab(suffix, label){
       toggle.textContent = (on ? 'Apagar ' : 'Encender ') + ledName;
       toggle.classList.toggle('secondary', !on);
       sendSimpleLed(suffix, led);
+      updateBothToggleLabel(suffix);
     });
   });
+  const bothToggle = wrap.querySelector('#simple_both_toggle'+suffix);
+  bothToggle.addEventListener('click', ()=>{
+    // Si ambos LEDs ya están encendidos, el botón los apaga a los dos;
+    // si al menos uno está apagado, los enciende a los dos.
+    const turnOn = !(simpleLedState[suffix+'_ir'].on && simpleLedState[suffix+'_red'].on);
+    ['ir','red'].forEach(led=>{
+      const key = suffix + '_' + led;
+      simpleLedState[key].on = turnOn;
+      const ledName = led === 'ir' ? 'IR' : 'Rojo';
+      const toggle = document.getElementById('simple_'+led+'_toggle'+suffix);
+      if(toggle){
+        toggle.textContent = (turnOn ? 'Apagar ' : 'Encender ') + ledName;
+        toggle.classList.toggle('secondary', !turnOn);
+      }
+      sendSimpleLed(suffix, led);
+    });
+    updateBothToggleLabel(suffix);
+  });
   return wrap;
+}
+// Mantiene el botón "Ambos LEDs" en sync con el estado real de IR/Rojo,
+// ya sea porque se tocaron individualmente o porque llegó un STATUS.
+function updateBothToggleLabel(suffix){
+  const btn = document.getElementById('simple_both_toggle'+suffix);
+  if(!btn) return;
+  const ir  = simpleLedState[suffix+'_ir'];
+  const red = simpleLedState[suffix+'_red'];
+  const bothOn = !!(ir && red && ir.on && red.on);
+  btn.textContent = bothOn ? 'Apagar ambos' : 'Encender ambos';
+  btn.classList.toggle('secondary', !bothOn);
 }
 function sendSimpleLed(suffix, led){
   const key = suffix + '_' + led;

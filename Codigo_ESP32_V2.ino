@@ -214,6 +214,17 @@ uint32_t g_loop_period_us = 2000;
 bool     g_recording   = false;
 String   g_rec_name    = "";
 File     f_s1, f_s2;
+
+// -------------------------------------------------------
+// Presencia real de cada sensor (detectada por I2C al arrancar). El
+// loop principal y printStatus() NUNCA deben tocar el bus de un sensor
+// no detectado — un ADPD1080 ausente suele quitar también las
+// resistencias pull-up de I2C de esa placa, dejando SDA/SCL flotando;
+// intentar leer ahí puede colgar el bus el tiempo suficiente para que
+// se caiga la conexión BLE (bug reportado: "si no conecto un sensor,
+// se desconecta luego luego").
+bool g_s1_present = false;
+bool g_s2_present = false;
 uint8_t  buf_s1_bin[4096], buf_s2_bin[4096];   // buffer binario antes de flush a flash
 size_t   buf_s1_len = 0, buf_s2_len = 0;
 uint32_t rec_start_ms  = 0;
@@ -469,14 +480,41 @@ void applyVbias(TwoWire &bus, SensorState &s, bool en) {
 }
 
 void printStatus(TwoWire &bus, SensorState &s, const char* name) {
-  uint32_t hz = 32000UL / ((uint32_t)readReg(bus, REG_FSAMPLE) * 4);
+  // Verificación de presencia I2C PRIMERO — igual que initSensor(), pero
+  // reevaluada en cada STATUS para que la app muestre un indicador real
+  // de "¿este ADPD1080 está conectado?" (permite operar con un solo
+  // sensor cableado). Si no está presente, NO se hace ninguna otra
+  // lectura I2C sobre este bus: un ADPD1080 ausente suele quitar
+  // también las resistencias pull-up de esa placa, y leer un bus
+  // flotante puede colgarse el tiempo suficiente para tirar la
+  // conexión BLE.
+  bus.beginTransmission(ADPD_ADDR);
+  bool present = (bus.endTransmission() == 0);
+
+  uint16_t regMode = 0, regFsample = 0, regNumAvg = 0, regTiaA = 0, regTiaB = 0;
+  uint16_t regPulsesA = 0, regPulsesB = 0, regLed1 = 0, regLed2 = 0;
+  uint32_t hz = 0;
+  if (present) {
+    regMode    = readReg(bus, REG_MODE);
+    regFsample = readReg(bus, REG_FSAMPLE);
+    regNumAvg  = readReg(bus, REG_NUM_AVG);
+    regTiaA    = readReg(bus, REG_SLOTA_TIA);
+    regTiaB    = readReg(bus, REG_SLOTB_TIA);
+    regPulsesA = readReg(bus, REG_SLOTA_PULSES);
+    regPulsesB = readReg(bus, REG_SLOTB_PULSES);
+    regLed1    = readReg(bus, REG_ILED1_COARSE);
+    regLed2    = readReg(bus, REG_ILED2_COARSE);
+    hz = regFsample ? (32000UL / ((uint32_t)regFsample * 4)) : 0;
+  }
+
   Serial.print("--- STATUS "); Serial.print(name); Serial.println(" ---");
-  Serial.print("MODE=0x");     Serial.println(readReg(bus, REG_MODE), HEX);
-  Serial.print("FSAMPLE=0x");  Serial.print(readReg(bus, REG_FSAMPLE), HEX);
+  Serial.print("PRESENT=");    Serial.println(present ? 1 : 0);
+  Serial.print("MODE=0x");     Serial.println(regMode, HEX);
+  Serial.print("FSAMPLE=0x");  Serial.print(regFsample, HEX);
   Serial.print(" ("); Serial.print(hz); Serial.println(" Hz)");
-  Serial.print("NUM_AVG=0x");  Serial.println(readReg(bus, REG_NUM_AVG), HEX);
-  Serial.print("PULSES_A=0x"); Serial.println(readReg(bus, REG_SLOTA_PULSES), HEX);
-  Serial.print("PULSES_B=0x"); Serial.println(readReg(bus, REG_SLOTB_PULSES), HEX);
+  Serial.print("NUM_AVG=0x");  Serial.println(regNumAvg, HEX);
+  Serial.print("PULSES_A=0x"); Serial.println(regPulsesA, HEX);
+  Serial.print("PULSES_B=0x"); Serial.println(regPulsesB, HEX);
   Serial.print("Loop period="); Serial.print(g_loop_period_us); Serial.println(" us");
   Serial.println("--- FIN ---");
 
@@ -490,22 +528,15 @@ void printStatus(TwoWire &bus, SensorState &s, const char* name) {
   // la configuración del sensor completo. Los delimitadores se dejan
   // solo como referencia visual en la consola, ya no los usa el parser.
   sendReply(String("--- STATUS ") + name + " ---");
-  // Verificación en vivo de presencia I2C — igual que initSensor(), pero
-  // reevaluada en cada STATUS para que la app pueda mostrar un indicador
-  // real de "¿este ADPD1080 está conectado?" (permite operar con un solo
-  // sensor cableado sin que el otro bloquee nada).
-  bus.beginTransmission(ADPD_ADDR);
-  bool present = (bus.endTransmission() == 0);
   sendReply(String("PRESENT_") + name + "=" + (present ? "1" : "0"));
-  sendReply(String("FSAMPLE_") + name + "=0x" + String(readReg(bus, REG_FSAMPLE), HEX) +
-            " (" + String(hz) + " Hz)");
-  sendReply(String("NUM_AVG_") + name + "=0x" + String(readReg(bus, REG_NUM_AVG), HEX));
-  sendReply(String("TIA_A_") + name + "=0x" + String(readReg(bus, REG_SLOTA_TIA), HEX));
-  sendReply(String("TIA_B_") + name + "=0x" + String(readReg(bus, REG_SLOTB_TIA), HEX));
-  sendReply(String("PULSES_A_") + name + "=0x" + String(readReg(bus, REG_SLOTA_PULSES), HEX));
-  sendReply(String("PULSES_B_") + name + "=0x" + String(readReg(bus, REG_SLOTB_PULSES), HEX));
-  sendReply(String("LED1_") + name + "=0x" + String(readReg(bus, REG_ILED1_COARSE), HEX));
-  sendReply(String("LED2_") + name + "=0x" + String(readReg(bus, REG_ILED2_COARSE), HEX));
+  sendReply(String("FSAMPLE_") + name + "=0x" + String(regFsample, HEX) + " (" + String(hz) + " Hz)");
+  sendReply(String("NUM_AVG_") + name + "=0x" + String(regNumAvg, HEX));
+  sendReply(String("TIA_A_") + name + "=0x" + String(regTiaA, HEX));
+  sendReply(String("TIA_B_") + name + "=0x" + String(regTiaB, HEX));
+  sendReply(String("PULSES_A_") + name + "=0x" + String(regPulsesA, HEX));
+  sendReply(String("PULSES_B_") + name + "=0x" + String(regPulsesB, HEX));
+  sendReply(String("LED1_") + name + "=0x" + String(regLed1, HEX));
+  sendReply(String("LED2_") + name + "=0x" + String(regLed2, HEX));
   // LED_DIS y VBIAS se reportan desde el SensorState en memoria (VBias no
   // es un registro de lectura directa de estado on/off) para que la app
   // web reconstruya el ON/OFF real de los LEDs y de VBias al conectar.
@@ -939,6 +970,8 @@ void setup() {
 
   bool ok1 = initSensor(Wire,  S1, "Sensor1");
   bool ok2 = initSensor(Wire1, S2, "Sensor2");
+  g_s1_present = ok1;
+  g_s2_present = ok2;
   if (!ok1 && !ok2) { Serial.println("ERROR FATAL: Ningun sensor."); while(1); }
 
   // initSensor() no toca REG_PD_BIAS — si VBias estaba guardado activo,
@@ -1013,10 +1046,11 @@ void loop() {
   handleConnectBlink();
 
   if (bleConnected || g_recording) {
-    uint16_t ir1  = readReg(Wire,  REG_SLOTA_CH1);
-    uint16_t red1 = readReg(Wire,  REG_SLOTB_CH1);
-    uint16_t ir2  = readReg(Wire1, REG_SLOTA_CH1);
-    uint16_t red2 = readReg(Wire1, REG_SLOTB_CH1);
+    // Solo se toca el bus de un sensor si fue detectado al arrancar —
+    // leer un bus sin sensor (sin sus pull-ups de I2C) puede colgarse.
+    uint16_t ir1 = 0, red1 = 0, ir2 = 0, red2 = 0;
+    if (g_s1_present) { ir1 = readReg(Wire,  REG_SLOTA_CH1); red1 = readReg(Wire,  REG_SLOTB_CH1); }
+    if (g_s2_present) { ir2 = readReg(Wire1, REG_SLOTA_CH1); red2 = readReg(Wire1, REG_SLOTB_CH1); }
 
     if (bleConnected) {
       uint32_t now = millis();
