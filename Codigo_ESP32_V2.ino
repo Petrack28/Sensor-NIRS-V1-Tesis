@@ -490,6 +490,13 @@ void printStatus(TwoWire &bus, SensorState &s, const char* name) {
   // la configuración del sensor completo. Los delimitadores se dejan
   // solo como referencia visual en la consola, ya no los usa el parser.
   sendReply(String("--- STATUS ") + name + " ---");
+  // Verificación en vivo de presencia I2C — igual que initSensor(), pero
+  // reevaluada en cada STATUS para que la app pueda mostrar un indicador
+  // real de "¿este ADPD1080 está conectado?" (permite operar con un solo
+  // sensor cableado sin que el otro bloquee nada).
+  bus.beginTransmission(ADPD_ADDR);
+  bool present = (bus.endTransmission() == 0);
+  sendReply(String("PRESENT_") + name + "=" + (present ? "1" : "0"));
   sendReply(String("FSAMPLE_") + name + "=0x" + String(readReg(bus, REG_FSAMPLE), HEX) +
             " (" + String(hz) + " Hz)");
   sendReply(String("NUM_AVG_") + name + "=0x" + String(readReg(bus, REG_NUM_AVG), HEX));

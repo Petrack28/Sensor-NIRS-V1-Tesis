@@ -91,6 +91,10 @@
   .devnav{display:flex;gap:8px;margin-bottom:12px;}
   .devnav button{flex:1;}
   .statusline.err{color:var(--red);}
+  .statusbadge{display:flex;align-items:center;justify-content:center;flex:1;
+        border-radius:8px;padding:9px 14px;font-size:13px;font-weight:700;
+        color:#fff;background:var(--red);transition:background .2s;}
+  .statusbadge.on{background:var(--green);}
 </style>
 </head>
 <body>
@@ -115,6 +119,11 @@
 
   <!-- ======================= TAB PRINCIPAL ======================= -->
   <section class="tab active" id="tab-principal">
+
+    <div class="card" style="display:flex;gap:10px;">
+      <div class="statusbadge" id="sensorStatus_S1">Sensor 1</div>
+      <div class="statusbadge" id="sensorStatus_S2">Sensor 2</div>
+    </div>
 
     <div class="card">
       <div class="sensorHead">
@@ -333,6 +342,10 @@ function bleDisconnect(){
 }
 function onBleDisconnected(){
   bleConnected = false; setConn(false);
+  // Sin conexión no hay forma de confirmar si los sensores responden —
+  // vuelven a rojo hasta la próxima conexión.
+  setSensorPresence('S1', false);
+  setSensorPresence('S2', false);
   logLine('Bluetooth desconectado.');
 }
 function bleToggleConnection(){
@@ -444,7 +457,16 @@ function applyLedIfReady(sensor, led){
   updateLedUi('_'+sensor, led, on, getActualCurrentMa(lastLedReg[regKey]));
   updateLedInfoLabel('_'+sensor);
 }
+// Indicador Sensor 1 / Sensor 2 (pestaña Principal) — verde si el chip
+// ADPD1080 responde por I2C (según PRESENT_Sx= del último STATUS),
+// rojo si no. Permite operar con un solo sensor cableado y ver de un
+// vistazo cuál está realmente conectado.
+function setSensorPresence(sensorKey, present){
+  const el = document.getElementById('sensorStatus_'+sensorKey);
+  if(el) el.classList.toggle('on', present);
+}
 const STATUS_LINE_PATTERNS = [
+  { re: /^PRESENT_(S[12])=(\d)$/, fn: (m)=>{ setSensorPresence(m[1], m[2] === '1'); } },
   { re: /^FSAMPLE_(S[12])=0x([0-9a-fA-F]+) \((\d+) Hz\)$/, fn: (m)=>{
       const suf = '_'+m[1];
       const fsKey = reverseLookup(FSAMPLE_PRESETS, parseInt(m[2],16));
