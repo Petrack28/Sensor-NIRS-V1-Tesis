@@ -196,6 +196,8 @@
     <div class="card">
       <h2>Visualización de grabación</h2>
       <div class="muted" id="vizTitle">Aún no hay ninguna grabación graficada — haz una adquisición temporizada.</div>
+      <div class="muted" style="margin-top:6px;">Arrastra sobre cualquier gráfica para hacer zoom a esa parte de la señal.</div>
+      <button class="btn secondary" id="vizResetZoom" style="margin-top:8px;">Restablecer zoom</button>
     </div>
     <div class="card">
       <div class="chanBlock">
@@ -490,7 +492,9 @@ function applyLedIfReady(sensor, led){
 // ADPD1080 responde por I2C (según PRESENT_Sx= del último STATUS),
 // rojo si no. Permite operar con un solo sensor cableado y ver de un
 // vistazo cuál está realmente conectado.
+const sensorPresence = { S1:false, S2:false }; // se usa para no mandar comandos a un sensor ausente
 function setSensorPresence(sensorKey, present){
+  sensorPresence[sensorKey] = present;
   const el = document.getElementById('sensorStatus_'+sensorKey);
   if(el) el.classList.toggle('on', present);
 }
@@ -680,15 +684,18 @@ function drawChannel(key){
     ctx.beginPath(); ctx.moveTo(ML,y); ctx.lineTo(ML+plotW,y); ctx.stroke();
     ctx.fillText(Math.round(v).toString(), ML-4, y);
   }
-  // Cuadrícula vertical (tiempo relativo, segundos) con etiquetas
+  // Cuadrícula vertical (tiempo absoluto, segundos desde que inició la
+  // adquisición) con etiquetas — usa tMin/tMax reales, no un rango fijo.
+  // Antes esto estaba hardcodeado a "-10.0s...0.0s" sin importar el
+  // tiempo real transcurrido (bug: las etiquetas nunca se actualizaban).
   ctx.textAlign = "center"; ctx.textBaseline = "top";
   const NX = 5;
   for(let i=0;i<=NX;i++){
-    const tRel = -WINDOW_S + (WINDOW_S*i/NX); // de -10s a 0s
+    const tLabel = tMin + (tMax-tMin)*i/NX;
     const x = ML + (plotW*i/NX);
     ctx.strokeStyle = "#1c2028";
     ctx.beginPath(); ctx.moveTo(x,MT); ctx.lineTo(x,MT+plotH); ctx.stroke();
-    ctx.fillText(tRel.toFixed(1)+'s', x, MT+plotH+2);
+    ctx.fillText(tLabel.toFixed(1)+'s', x, MT+plotH+2);
   }
 
   // Línea de datos
@@ -848,13 +855,68 @@ let recording = false, recTimer = null, recRemaining = 0;
 document.getElementById('acqMode').addEventListener('change', (e)=>{
   document.getElementById('timedFields').style.display = (e.target.value==='timed') ? 'block' : 'none';
 });
+// ── LEDs automáticos ────────────────────────────────────────────────
+// Al iniciar una adquisición se encienden solos (para no tener que ir
+// a las pestañas de sensor cada vez); al terminar, se apagan solos.
+// Solo se tocan los sensores que el indicador muestre como realmente
+// conectados — mandar comandos a un sensor ausente no debería colgar
+// nada (eso ya se corrigió en el firmware), pero de todos modos no
+// tiene sentido encender un LED que no existe físicamente.
+function setSimpleLedOn(suf, led, on){
+  const key = suf + '_' + led;
+  if(!simpleLedState[key]) simpleLedState[key] = { on:false, ma:50 };
+  simpleLedState[key].on = on;
+  const ledName = led === 'ir' ? 'IR' : 'Rojo';
+  const toggle = document.getElementById('simple_'+led+'_toggle'+suf);
+  if(toggle){
+    toggle.textContent = (on ? 'Apagar ' : 'Encender ') + ledName;
+    toggle.classList.toggle('secondary', !on);
+  }
+  sendSimpleLed(suf, led);
+  updateBothToggleLabel(suf);
+}
+function ensureAllLedsOn(){
+  ['S1','S2'].forEach(sensorKey=>{
+    if(!sensorPresence[sensorKey]) return;
+    const suf = '_'+sensorKey;
+    ['ir','red'].forEach(led=>{
+      const key = suf+'_'+led;
+      if(!simpleLedState[key] || !simpleLedState[key].on) setSimpleLedOn(suf, led, true);
+    });
+  });
+}
+function turnOffAllLeds(){
+  ['S1','S2'].forEach(sensorKey=>{
+    if(!sensorPresence[sensorKey]) return;
+    const suf = '_'+sensorKey;
+    ['ir','red'].forEach(led=>setSimpleLedOn(suf, led, false));
+  });
+}
+
+// ── Iniciar / Detener ───────────────────────────────────────────────
+let warmupTimer = null;
 document.getElementById('btnPlay').addEventListener('click', ()=>{
+  document.getElementById('btnPlay').disabled = true;
+  ensureAllLedsOn();
+  let warmup = 5;
+  setAcqStatus('Iniciando sensor, espere ' + warmup + ' segundos…', 'warn');
+  clearInterval(warmupTimer);
+  warmupTimer = setInterval(()=>{
+    warmup--;
+    if(warmup > 0){
+      setAcqStatus('Iniciando sensor, espere ' + warmup + ' segundos…', 'warn');
+    } else {
+      clearInterval(warmupTimer);
+      startAcquisitionNow();
+    }
+  }, 1000);
+});
+function startAcquisitionNow(){
   const mode = document.getElementById('acqMode').value;
   resetCharts();
   viewingLive = true;
   if(mode === 'realtime'){
     setAcqStatus('Viendo en tiempo real (sin guardar).', 'ok');
-    document.getElementById('btnPlay').disabled = true;
     document.getElementById('btnStop').disabled = false;
     return;
   }
@@ -863,12 +925,13 @@ document.getElementById('btnPlay').addEventListener('click', ()=>{
   const iso  = new Date().toISOString();
   send('RECORD_START:' + name + ':' + iso);
   recRemaining = dur;
-  document.getElementById('btnPlay').disabled = true;
-});
+}
 document.getElementById('btnStop').addEventListener('click', ()=>{
   if(recording){ send('RECORD_STOP'); }
   else {
+    clearInterval(warmupTimer);
     viewingLive = false;
+    turnOffAllLeds();
     document.getElementById('btnPlay').disabled = false;
     document.getElementById('btnStop').disabled = true;
     setAcqStatus('Listo.', '');
@@ -888,6 +951,7 @@ function onRecordStarted(name){
 function onRecordStopped(name){
   recording = false;
   viewingLive = false;
+  turnOffAllLeds();
   clearInterval(recTimer);
   document.getElementById('btnPlay').disabled = false;
   document.getElementById('btnStop').disabled = true;
@@ -1112,6 +1176,10 @@ function drawStaticChart(canvasId, t, v, color){
   const px = tt => ML + ((tt-tMin)/((tMax-tMin)||1))*plotW;
   const py = vv => MT + plotH - ((vv-mn)/((mx-mn)||1))*plotH;
 
+  // Geometría guardada para poder convertir una posición de arrastre
+  // (píxeles) de vuelta a un tiempo real — la usa el zoom por arrastre.
+  chartGeom[canvasId] = { tMin, tMax, ML, plotW };
+
   ctx.strokeStyle = "#232833"; ctx.lineWidth = 1;
   ctx.fillStyle = "#6b7280"; ctx.font = "10px ui-monospace,Consolas,monospace";
   ctx.textAlign = "right"; ctx.textBaseline = "middle";
@@ -1139,20 +1207,111 @@ function drawStaticChart(canvasId, t, v, color){
   ctx.stroke();
 }
 let lastVizName = null, lastVizResults = null;
-function renderRecordingChart(name, results){
+// Recorta un par (t,v) a una ventana [tMin,tMax] antes de decimar —
+// permite "acercar" sin perder resolución temporal en la zona elegida,
+// porque siempre se decima la porción visible, no la grabación completa.
+function sliceByTime(t, v, tMin, tMax){
+  let i0 = 0, i1 = t.length;
+  while(i0 < t.length && t[i0] < tMin) i0++;
+  while(i1 > i0 && t[i1-1] > tMax) i1--;
+  return { t: t.slice(i0,i1), v: v.slice(i0,i1) };
+}
+function renderRecordingChart(name, results, zoomRange){
   lastVizName = name; lastVizResults = results;
   const title = document.getElementById('vizTitle');
-  if(title) title.textContent = 'Grabación: ' + name;
+  if(title){
+    title.textContent = 'Grabación: ' + name +
+      (zoomRange ? ` (zoom ${zoomRange.tMin.toFixed(1)}s–${zoomRange.tMax.toFixed(1)}s)` : '');
+  }
   ['S1','S2'].forEach(sensor=>{
     const rec = results[sensor];
     if(!rec) return;
-    const ir  = decimateSeries(rec.t, rec.ch1, 900);
-    const red = decimateSeries(rec.t, rec.ch2, 900);
+    let tIr = rec.t, vIr = rec.ch1, tRed = rec.t, vRed = rec.ch2;
+    if(zoomRange){
+      const sIr  = sliceByTime(rec.t, rec.ch1, zoomRange.tMin, zoomRange.tMax);
+      const sRed = sliceByTime(rec.t, rec.ch2, zoomRange.tMin, zoomRange.tMax);
+      tIr = sIr.t; vIr = sIr.v; tRed = sRed.t; vRed = sRed.v;
+    }
+    const ir  = decimateSeries(tIr, vIr, 900);
+    const red = decimateSeries(tRed, vRed, 900);
     drawStaticChart('vizChart_'+sensor+'_IR',   ir.t,  ir.v,  '#4da3ff');
     drawStaticChart('vizChart_'+sensor+'_Rojo', red.t, red.v, '#ff5c5c');
   });
-  setAcqStatus('Grabación guardada y graficada en la pestaña "Visualización".', 'ok');
+  if(!zoomRange) setAcqStatus('Grabación guardada y graficada en la pestaña "Visualización".', 'ok');
 }
+
+// ============================================================
+// ZOOM POR ARRASTRE — las 4 gráficas comparten el mismo rango de
+// tiempo (vizZoomRange). Arrastrar horizontalmente sobre cualquiera
+// de ellas selecciona una ventana y hace zoom sincronizado en las 4;
+// "Restablecer zoom" vuelve a la grabación completa.
+// ============================================================
+const chartGeom = {};   // canvasId -> {tMin, tMax, ML, plotW} del último dibujo
+let vizZoomRange = null;
+const VIZ_CHART_IDS = ['vizChart_S1_IR','vizChart_S1_Rojo','vizChart_S2_IR','vizChart_S2_Rojo'];
+
+function pixelToVizTime(canvasId, clientX){
+  const c = document.getElementById(canvasId);
+  const geom = chartGeom[canvasId];
+  if(!c || !geom) return null;
+  const rect = c.getBoundingClientRect();
+  const xCss = clientX - rect.left;
+  const frac = (xCss - geom.ML) / geom.plotW;
+  return geom.tMin + frac*(geom.tMax - geom.tMin);
+}
+function drawZoomOverlay(canvasId, xStartCss, xEndCss){
+  const c = document.getElementById(canvasId);
+  if(!c) return;
+  const ctx = c.getContext('2d');
+  const rect = c.getBoundingClientRect();
+  const x0 = Math.min(xStartCss, xEndCss) - rect.left;
+  const x1 = Math.max(xStartCss, xEndCss) - rect.left;
+  ctx.save();
+  ctx.fillStyle = 'rgba(77,163,255,0.25)';
+  ctx.fillRect(x0, 0, x1-x0, c.clientHeight);
+  ctx.strokeStyle = '#4da3ff';
+  ctx.beginPath(); ctx.moveTo(x0,0); ctx.lineTo(x0,c.clientHeight); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x1,0); ctx.lineTo(x1,c.clientHeight); ctx.stroke();
+  ctx.restore();
+}
+let vizDragging = false, vizDragStartX = null;
+function vizDragMove(clientX){
+  if(!vizDragging || !lastVizResults) return;
+  // Redibuja la vista actual (limpia overlays anteriores) y superpone
+  // el rectángulo de selección mientras se arrastra.
+  renderRecordingChart(lastVizName, lastVizResults, vizZoomRange);
+  VIZ_CHART_IDS.forEach(id => drawZoomOverlay(id, vizDragStartX, clientX));
+}
+function vizDragEnd(clientX){
+  if(!vizDragging) return;
+  vizDragging = false;
+  const anyId = VIZ_CHART_IDS.find(id => chartGeom[id]);
+  if(!anyId){ return; }
+  const t0 = pixelToVizTime(anyId, Math.min(vizDragStartX, clientX));
+  const t1 = pixelToVizTime(anyId, Math.max(vizDragStartX, clientX));
+  if(t0 != null && t1 != null && (t1 - t0) > 0.05){
+    vizZoomRange = { tMin: t0, tMax: t1 };
+  }
+  if(lastVizResults) renderRecordingChart(lastVizName, lastVizResults, vizZoomRange);
+}
+VIZ_CHART_IDS.forEach(id=>{
+  const c = document.getElementById(id);
+  if(!c) return;
+  c.addEventListener('mousedown', e=>{ vizDragging = true; vizDragStartX = e.clientX; });
+  c.addEventListener('mousemove', e=>{ if(vizDragging) vizDragMove(e.clientX); });
+  c.addEventListener('touchstart', e=>{
+    vizDragging = true; vizDragStartX = e.touches[0].clientX;
+  }, {passive:true});
+  c.addEventListener('touchmove', e=>{
+    if(vizDragging) vizDragMove(e.touches[0].clientX);
+  }, {passive:true});
+  c.addEventListener('touchend', e=>{ vizDragEnd(e.changedTouches[0].clientX); });
+});
+window.addEventListener('mouseup', e=>{ if(vizDragging) vizDragEnd(e.clientX); });
+document.getElementById('vizResetZoom').addEventListener('click', ()=>{
+  vizZoomRange = null;
+  if(lastVizResults) renderRecordingChart(lastVizName, lastVizResults, null);
+});
 
 // ============================================================
 // PANEL SIMPLE DE SENSOR (S1 / S2) — vista amigable para el
@@ -1412,7 +1571,7 @@ document.querySelectorAll('nav button').forEach(btn=>{
     // si hay una gráfica pendiente, se vuelve a dibujar apenas la
     // pestaña se hace visible (por si el canvas quedó con tamaño 0
     // de una ejecución anterior, o cambió el tamaño de la ventana).
-    if(btn.dataset.tab === 'viz' && lastVizResults) renderRecordingChart(lastVizName, lastVizResults);
+    if(btn.dataset.tab === 'viz' && lastVizResults) renderRecordingChart(lastVizName, lastVizResults, vizZoomRange);
   });
 });
 
